@@ -1,0 +1,27 @@
+{
+  "name": "mysterysnus-oms",
+  "version": "0.1.0",
+  "description": "Order-, kund- och logistiksystem för Mysterysnus.se",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "node --no-warnings=ExperimentalWarning --watch src/server.ts",
+    "start": "node --no-warnings=ExperimentalWarning src/server.ts",
+    "migrate": "node --no-warnings=ExperimentalWarning src/db/migrate.ts",
+    "seed": "node --no-warnings=ExperimentalWarning src/db/seed.ts",
+    "test": "node --no-warnings=ExperimentalWarning --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "hono": "^4.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  }
+}
