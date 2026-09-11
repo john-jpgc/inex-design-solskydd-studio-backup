@@ -5,6 +5,7 @@ import { purgeExpiredSessions } from './services/auth.ts';
 import { renewDueSubscriptions } from './services/subscriptions.ts';
 import { labelProviderStatus } from './services/labels.ts';
 import { createApp } from './http/app.ts';
+import { DEV_ADMIN_PASSWORD, seedAdmin } from './db/seed.ts';
 
 const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
 if (major < 22 || (major === 22 && minor < 18)) {
@@ -20,6 +21,12 @@ if (isProduction() && !config.apiKey) {
 const db = openDatabase(config.dbPath);
 const ran = migrate(db);
 if (ran.length) console.log(`Körde migrationer: ${ran.join(', ')}`);
+
+// Se till att det alltid går att logga in: skapa admin-kontot om inget finns.
+const createdAdmin = seedAdmin(db);
+if (createdAdmin) {
+  console.log(`Skapade admin-konto: ${createdAdmin} (lösenord: ${process.env.ADMIN_PASSWORD ? 'enligt ADMIN_PASSWORD' : DEV_ADMIN_PASSWORD})`);
+}
 
 const app = createApp(db, { log: true });
 const sessionTimer = setInterval(() => purgeExpiredSessions(db), 60 * 60 * 1000);

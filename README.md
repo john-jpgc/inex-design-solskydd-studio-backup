@@ -68,8 +68,10 @@ docker compose up --build   # öppna http://localhost:3000/admin
 Vid första starten i Docker skapas admin-kontot av `ADMIN_EMAIL`/`ADMIN_PASSWORD`
 (kör `docker compose exec oms node src/db/seed.ts` för att lägga in exempeldata).
 
-Standardinloggning efter `npm run seed` (om `ADMIN_EMAIL`/`ADMIN_PASSWORD` inte satts):
-`admin@mysterysnus.se` / `admin123` – byt direkt.
+Standardinloggning (om `ADMIN_EMAIL`/`ADMIN_PASSWORD` inte satts i `.env`):
+`admin@mysterysnus.se` / `admin123` – byt direkt. Servern skapar kontot själv vid start om
+det saknas, så det går att logga in även om `npm run seed` hoppats över.
+Värden i `.env` läses in automatiskt av alla `npm run`-kommandon.
 
 Övriga kommandon: `npm test`, `npm run typecheck`, `npm run migrate`, `npm start`.
 

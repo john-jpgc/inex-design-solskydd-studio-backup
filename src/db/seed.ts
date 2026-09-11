@@ -2,6 +2,7 @@
  * Fyller databasen med ett admin-konto och – utanför produktion – exempeldata
  * (produkter, kunder och ordrar i olika statusar). Kan köras flera gånger.
  */
+import { pathToFileURL } from 'node:url';
 import { config, isProduction } from '../config.ts';
 import { migrate, openDatabase, type Db } from './connection.ts';
 import { createStaffUser, listStaff } from '../services/auth.ts';
@@ -12,10 +13,13 @@ import { createOrder, markPaid, pack, ship, startPicking, markDelivered } from '
 import type { Strength } from '../domain/products.ts';
 import { createSubscription, renewSubscription } from '../services/subscriptions.ts';
 
+export const DEV_ADMIN_PASSWORD = 'admin123';
+
+/** Skapar admin-kontot om ingen personal finns. Returnerar e-posten om ett konto skapades. */
 export function seedAdmin(db: Db): string | null {
   if (listStaff(db).length > 0) return null;
-  const email = process.env.ADMIN_EMAIL ?? 'admin@mysterysnus.se';
-  const password = process.env.ADMIN_PASSWORD ?? (isProduction() ? '' : 'admin123');
+  const email = process.env.ADMIN_EMAIL || 'admin@mysterysnus.se';
+  const password = process.env.ADMIN_PASSWORD || (isProduction() ? '' : DEV_ADMIN_PASSWORD);
   if (!password) throw new Error('ADMIN_PASSWORD måste sättas för att skapa admin-kontot i produktion');
   createStaffUser(db, { email, name: 'Admin', role: 'admin', password });
   return email;
@@ -115,13 +119,19 @@ export function seedSampleData(db: Db): number {
   return 8;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Körs bara när filen startas direkt (`npm run seed`), inte när den importeras.
+// pathToFileURL behövs för att jämförelsen ska fungera även på Windows.
+const runDirectly = process.argv[1] ? pathToFileURL(process.argv[1]).href === import.meta.url : false;
+
+if (runDirectly) {
   const db = openDatabase(config.dbPath);
   migrate(db);
   const admin = seedAdmin(db);
   if (admin) {
     console.log(`Skapade admin-konto: ${admin}`);
-    if (!process.env.ADMIN_PASSWORD) console.log('  Lösenord: admin123  ← byt detta direkt (eller sätt ADMIN_PASSWORD).');
+    if (!process.env.ADMIN_PASSWORD) console.log(`  Lösenord: ${DEV_ADMIN_PASSWORD}  ← byt detta direkt (eller sätt ADMIN_PASSWORD).`);
+  } else {
+    console.log('Admin-konto finns redan.');
   }
   const products = seedProducts(db);
   if (products) console.log(`Lade in ${products} exempelprodukter.`);
