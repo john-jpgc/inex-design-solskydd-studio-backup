@@ -180,4 +180,42 @@ CREATE TABLE order_events (
 CREATE INDEX idx_order_events_order ON order_events(order_id, created_at);
 `,
   },
+  {
+    version: 2,
+    sql: `
+CREATE TABLE subscriptions (
+  id INTEGER PRIMARY KEY,
+  customer_id INTEGER NOT NULL REFERENCES customers(id),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'cancelled')),
+  box_size INTEGER NOT NULL CHECK (box_size > 0),
+  quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+  strength TEXT CHECK (strength IS NULL OR strength IN ('mild', 'medium', 'strong', 'extra_strong')),
+  price_ore INTEGER NOT NULL,
+  interval_months INTEGER NOT NULL DEFAULT 1 CHECK (interval_months > 0),
+  next_renewal_at TEXT NOT NULL,
+  last_renewed_at TEXT,
+  external_ref TEXT,
+  payment_method TEXT,
+  notes TEXT,
+  last_error TEXT,
+  started_at TEXT NOT NULL,
+  cancelled_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_subscriptions_customer ON subscriptions(customer_id);
+CREATE INDEX idx_subscriptions_due ON subscriptions(status, next_renewal_at);
+CREATE UNIQUE INDEX idx_subscriptions_external_ref ON subscriptions(external_ref) WHERE external_ref IS NOT NULL;
+
+ALTER TABLE orders ADD COLUMN subscription_id INTEGER REFERENCES subscriptions(id);
+ALTER TABLE orders ADD COLUMN period TEXT;
+CREATE UNIQUE INDEX idx_orders_subscription_period ON orders(subscription_id, period) WHERE subscription_id IS NOT NULL;
+
+ALTER TABLE shipments ADD COLUMN label_provider TEXT;
+ALTER TABLE shipments ADD COLUMN label_ref TEXT;
+ALTER TABLE shipments ADD COLUMN label_format TEXT;
+ALTER TABLE shipments ADD COLUMN label_data BLOB;
+ALTER TABLE shipments ADD COLUMN label_created_at TEXT;
+`,
+  },
 ];

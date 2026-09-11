@@ -5,6 +5,7 @@ import { customersApi } from './customers.ts';
 import { productsApi } from './products.ts';
 import { ordersApi } from './orders.ts';
 import { shipmentsApi } from './shipments.ts';
+import { subscriptionsApi } from './subscriptions.ts';
 
 export const api = new Hono<AppEnv>()
   .get('/health', (c) => c.json({ ok: true, service: 'mysterysnus-oms' }))
@@ -12,4 +13,5 @@ export const api = new Hono<AppEnv>()
   .route('/customers', customersApi)
   .route('/products', productsApi)
   .route('/orders', ordersApi)
-  .route('/shipments', shipmentsApi);
+  .route('/shipments', shipmentsApi)
+  .route('/subscriptions', subscriptionsApi);

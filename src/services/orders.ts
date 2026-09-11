@@ -58,6 +58,8 @@ export interface Order {
   shippedAt: string | null;
   deliveredAt: string | null;
   cancelledAt: string | null;
+  subscriptionId: number | null;
+  period: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -10,6 +10,7 @@ import { adjustStock } from '../services/inventory.ts';
 import { createCustomer, countCustomers } from '../services/customers.ts';
 import { createOrder, markPaid, pack, ship, startPicking, markDelivered } from '../services/orders.ts';
 import type { Strength } from '../domain/products.ts';
+import { createSubscription, renewSubscription } from '../services/subscriptions.ts';
 
 export function seedAdmin(db: Db): string | null {
   if (listStaff(db).length > 0) return null;
@@ -73,37 +74,45 @@ export function seedSampleData(db: Db): number {
   });
 
   // Väntar på betalning
-  createOrder(db, { customerId: maja.id, lines: [{ kind: 'mystery_box', boxSize: 5, quantity: 1 }], paymentMethod: 'klarna', externalRef: 'SHOP-1001', channel: 'web' });
+  createOrder(db, { customerId: maja.id, lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }], paymentMethod: 'klarna', externalRef: 'SHOP-1001', channel: 'web' });
   // Betald – väntar på plock
   createOrder(db, {
     customerId: anna.id, paymentStatus: 'paid', paymentMethod: 'swish', paymentRef: 'SWISH-88213', externalRef: 'SHOP-1002',
-    lines: [{ kind: 'mystery_box', boxSize: 10, quantity: 1 }, { kind: 'product', sku: 'ZYN-COOL-MINT-S', quantity: 3 }],
+    lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }, { kind: 'product', sku: 'ZYN-COOL-MINT-S', quantity: 3 }],
     customerNote: 'Gärna extra mycket mint!',
   });
   // Plockas
-  const o3 = createOrder(db, { customerId: erik.id, paymentStatus: 'paid', paymentMethod: 'kort', externalRef: 'SHOP-1003', lines: [{ kind: 'mystery_box', boxSize: 20, quantity: 1, strength: 'extra_strong' }] });
+  const o3 = createOrder(db, { customerId: erik.id, paymentStatus: 'paid', paymentMethod: 'kort', externalRef: 'SHOP-1003', lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 2, strength: 'extra_strong' }] });
   startPicking(db, o3.id, 'seed');
   // Packad
   const o4 = createOrder(db, { customerId: anna.id, paymentStatus: 'paid', paymentMethod: 'swish', externalRef: 'SHOP-1004', lines: [{ kind: 'product', sku: 'VELO-ICE-COOL-S', quantity: 5 }, { kind: 'product', sku: 'KILLA-COLD-MINT', quantity: 5 }] });
   startPicking(db, o4.id, 'seed');
   pack(db, o4.id, 'seed');
   // Skickad
-  const o5 = createOrder(db, { customerId: erik.id, paymentStatus: 'paid', paymentMethod: 'klarna', externalRef: 'SHOP-1005', lines: [{ kind: 'mystery_box', boxSize: 5, quantity: 2 }] });
+  const o5 = createOrder(db, { customerId: erik.id, paymentStatus: 'paid', paymentMethod: 'klarna', externalRef: 'SHOP-1005', lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }] });
   startPicking(db, o5.id, 'seed');
   pack(db, o5.id, 'seed');
   ship(db, o5.id, { carrier: 'postnord', service: 'MyPack Collect', trackingNumber: '00370733350012345678', pickupPoint: 'ICA Nära Avenyn' }, 'seed');
   // Levererad
-  const o6 = createOrder(db, { customerId: maja.id, paymentStatus: 'paid', paymentMethod: 'swish', externalRef: 'SHOP-1006', lines: [{ kind: 'mystery_box', boxSize: 5, quantity: 1 }], placedAt: new Date(Date.now() - 14 * 86_400_000).toISOString() });
+  const o6 = createOrder(db, { customerId: maja.id, paymentStatus: 'paid', paymentMethod: 'swish', externalRef: 'SHOP-1006', lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }], placedAt: new Date(Date.now() - 14 * 86_400_000).toISOString() });
   startPicking(db, o6.id, 'seed');
   pack(db, o6.id, 'seed');
   ship(db, o6.id, { carrier: 'budbee', trackingNumber: 'BUDBEE-55123' }, 'seed');
-  const o7 = createOrder(db, { customerId: anna.id, paymentStatus: 'paid', paymentMethod: 'kort', externalRef: 'SHOP-0999', lines: [{ kind: 'mystery_box', boxSize: 10, quantity: 1 }], placedAt: new Date(Date.now() - 30 * 86_400_000).toISOString() });
+  const o7 = createOrder(db, { customerId: anna.id, paymentStatus: 'paid', paymentMethod: 'kort', externalRef: 'SHOP-0999', lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }], placedAt: new Date(Date.now() - 30 * 86_400_000).toISOString() });
   startPicking(db, o7.id, 'seed');
   pack(db, o7.id, 'seed');
   ship(db, o7.id, { carrier: 'instabox', trackingNumber: 'IB-9981' }, 'seed');
   markDelivered(db, o7.id, 'seed');
-  void markPaid;
-  return 7;
+
+  // Prenumerationer: Anna har fått sin första box (betald), Erik förnyas om några dagar, Maja är pausad.
+  const subAnna = createSubscription(db, { customerId: anna.id, paymentMethod: 'klarna', externalRef: 'STRIPE-SUB-001', startAt: new Date(Date.now() - 2 * 86_400_000).toISOString() }, 'seed');
+  const renewed = renewSubscription(db, subAnna.id, { paymentStatus: 'paid', paymentRef: 'KL-77001' }, 'seed');
+  markPaid; // (används inte – behålls för tydlighet i importen)
+  void renewed;
+  createSubscription(db, { customerId: erik.id, strength: 'extra_strong', paymentMethod: 'kort', externalRef: 'STRIPE-SUB-002', startAt: new Date(Date.now() + 3 * 86_400_000).toISOString() }, 'seed');
+  const subMaja = createSubscription(db, { customerId: maja.id, strength: 'mild', paymentMethod: 'swish', startAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), notes: 'Vill ha fruktiga smaker' }, 'seed');
+  db.prepare("UPDATE subscriptions SET status = 'paused' WHERE id = ?").run(subMaja.id);
+  return 8;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -118,7 +127,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   if (products) console.log(`Lade in ${products} exempelprodukter.`);
   if (!isProduction()) {
     const orders = seedSampleData(db);
-    if (orders) console.log(`Lade in exempelkunder och ${orders} exempelordrar.`);
+    if (orders) console.log(`Lade in exempelkunder, ${orders} exempelordrar och 3 prenumerationer.`);
   }
   console.log('Klart.');
   db.close();

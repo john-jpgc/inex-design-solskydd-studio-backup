@@ -16,7 +16,12 @@ import {
   cancelOrder, cancelPicking, createOrder, getOrder, listOrders, markDelivered, markPaid, markRefunded, markReturned,
   orderStatusCounts, pack, reopenForPicking, setBoxPicks, setInternalNote, ship, startPicking, type OrderLineInput,
 } from '../../services/orders.ts';
-import { addShipmentEvent, listShipments, updateShipment } from '../../services/shipments.ts';
+import { addShipmentEvent, getShipment, listShipments, updateShipment } from '../../services/shipments.ts';
+import { createLabelForShipment, labelProviderStatus } from '../../services/labels.ts';
+import {
+  cancelSubscription, createSubscription, getSubscription, listSubscriptions, pauseSubscription, renewDueSubscriptions,
+  renewSubscription, resumeSubscription, subscriptionCounts, updateSubscription,
+} from '../../services/subscriptions.ts';
 import { idParam } from '../validate.ts';
 import * as v from './views.ts';
 
@@ -94,7 +99,7 @@ admin.get('/', (c) => {
   const lowStock = listProducts(db, { activeOnly: true, lowStockOnly: true });
   const refundDue = listOrders(db, { limit: 200 }).filter((o) => o.paymentStatus === 'refund_due');
   const unpaid = listOrders(db, { status: 'pending', limit: 10 });
-  return c.html(v.dashboardPage(staff, { counts, queue, lowStock, refundDue, unpaid }));
+  return c.html(v.dashboardPage(staff, { counts, queue, lowStock, refundDue, unpaid, subs: subscriptionCounts(db), labelProvider: labelProviderStatus() }));
 });
 
 /* ---------- Ordrar ---------- */
@@ -149,7 +154,7 @@ admin.get('/orders/:id', (c) => {
   const db = c.get('db');
   const order = getOrder(db, idParam(c));
   const products = order.status === 'picking' ? listProducts(db, { activeOnly: true, inStockOnly: true }) : [];
-  return c.html(v.orderPage(c.get('staff')!, order, products, flash(c)));
+  return c.html(v.orderPage(c.get('staff')!, order, products, { ...flash(c), labelProvider: labelProviderStatus() }));
 });
 
 admin.get('/orders/:id/packslip', (c) => c.html(v.packSlipPage(getOrder(c.get('db'), idParam(c)))));
@@ -200,10 +205,15 @@ admin.post('/orders/:id/actions/:action', async (c) => {
       case 'ship': {
         const carrier = str(form, 'carrier');
         if (!isCarrier(carrier)) throw new AppError(422, 'INVALID_CARRIER', 'Välj en transportör');
-        return void ship(db, id, {
+        const shipped = ship(db, id, {
           carrier, service: opt(form, 'service'), trackingNumber: opt(form, 'trackingNumber'),
           pickupPoint: opt(form, 'pickupPoint'), weightGrams: num(form, 'weightGrams'),
         }, actor);
+        const shipment = shipped.shipments[0];
+        if (shipment && !shipment.trackingNumber && labelProviderStatus().configured) {
+          return createLabelForShipment(db, shipment.id, actor).then(() => undefined);
+        }
+        return;
       }
       case 'deliver': return void markDelivered(db, id, actor);
       case 'cancel': return void cancelOrder(db, id, str(form, 'reason'), actor);
@@ -248,7 +258,7 @@ admin.post('/customers/new', async (c) => {
 admin.get('/customers/:id', (c) => {
   const db = c.get('db');
   const id = idParam(c);
-  return c.html(v.customerPage(c.get('staff')!, getCustomer(db, id), listOrders(db, { customerId: id, limit: 100 }), flash(c)));
+  return c.html(v.customerPage(c.get('staff')!, getCustomer(db, id), listOrders(db, { customerId: id, limit: 100 }), listSubscriptions(db, { customerId: id }), flash(c)));
 });
 
 admin.post('/customers/:id', async (c) => {
@@ -344,5 +354,90 @@ admin.post('/shipments/:id/events', async (c) => {
     const status = str(form, 'status');
     if (!isShipmentStatus(status)) throw new AppError(422, 'INVALID_STATUS', 'Ogiltig status');
     addShipmentEvent(c.get('db'), id, { status, location: opt(form, 'location') }, c.get('actor'));
+  });
+});
+
+/* ---------- Etiketter ---------- */
+
+admin.post('/shipments/:id/label', async (c) => {
+  const id = idParam(c);
+  const shipment = getShipment(c.get('db'), id);
+  return attempt(c, `/admin/orders/${shipment.orderId}`, 'Etikett skapad', async () => {
+    await createLabelForShipment(c.get('db'), id, c.get('actor'));
+  });
+});
+
+/* ---------- Prenumerationer ---------- */
+
+admin.get('/subscriptions', (c) => {
+  const status = c.req.query('status');
+  const q = c.req.query('q') || undefined;
+  const valid = status === 'active' || status === 'paused' || status === 'cancelled' ? status : undefined;
+  return c.html(v.subscriptionsPage(c.get('staff')!, { subscriptions: listSubscriptions(c.get('db'), { status: valid, q, limit: 500 }), status: valid, q, ...flash(c) }));
+});
+
+admin.post('/subscriptions/renew-due', (c) => {
+  const result = renewDueSubscriptions(c.get('db'), undefined, c.get('actor'));
+  const msg = `${result.created.length} order(s) skapade${result.failed.length ? `, ${result.failed.length} misslyckades` : ''}`;
+  return redirect(c, '/admin/subscriptions', result.failed.length ? { err: msg } : { msg });
+});
+
+admin.get('/subscriptions/:id', (c) => {
+  const db = c.get('db');
+  const id = idParam(c);
+  const sub = getSubscription(db, id);
+  const orders = listOrders(db, { customerId: sub.customerId, limit: 200 }).filter((o) => o.subscriptionId === id);
+  return c.html(v.subscriptionPage(c.get('staff')!, sub, getCustomer(db, sub.customerId), orders, flash(c)));
+});
+
+admin.post('/subscriptions/:id', async (c) => {
+  const id = idParam(c);
+  const form = (await c.req.parseBody()) as Form;
+  return attempt(c, `/admin/subscriptions/${id}`, 'Prenumerationen sparad', () => {
+    const strength = str(form, 'strength');
+    const nextDate = str(form, 'nextRenewalDate');
+    const priceKr = num(form, 'priceKr');
+    updateSubscription(c.get('db'), id, {
+      boxSize: num(form, 'boxSize') ?? undefined, quantity: num(form, 'quantity') ?? undefined,
+      strength: isStrength(strength) ? strength : null, priceOre: priceKr != null ? Math.round(priceKr * 100) : undefined,
+      intervalMonths: num(form, 'intervalMonths') ?? undefined,
+      nextRenewalAt: nextDate ? new Date(`${nextDate}T08:00:00Z`).toISOString() : undefined,
+      paymentMethod: opt(form, 'paymentMethod'), externalRef: opt(form, 'externalRef'), notes: opt(form, 'notes'),
+    });
+  });
+});
+
+admin.post('/subscriptions/:id/actions/:action', (c) => {
+  const id = idParam(c);
+  const action = c.req.param('action');
+  const db = c.get('db');
+  const messages: Record<string, string> = { renew: 'Månadens order skapad', pause: 'Prenumerationen pausad', resume: 'Prenumerationen återupptagen', cancel: 'Prenumerationen avslutad' };
+  return attempt(c, `/admin/subscriptions/${id}`, messages[action] ?? 'Klart', () => {
+    switch (action) {
+      case 'renew': {
+        const r = renewSubscription(db, id, {}, c.get('actor'));
+        if (!r.created) throw new AppError(409, 'ALREADY_RENEWED', `Perioden har redan en order: ${r.order.orderNumber}`);
+        return;
+      }
+      case 'pause': return void pauseSubscription(db, id);
+      case 'resume': return void resumeSubscription(db, id);
+      case 'cancel': return void cancelSubscription(db, id);
+      default: throw new AppError(404, 'NOT_FOUND', `Okänd åtgärd: ${action}`);
+    }
+  });
+});
+
+admin.post('/customers/:id/subscriptions', async (c) => {
+  const customerId = idParam(c);
+  const form = (await c.req.parseBody()) as Form;
+  return attempt(c, `/admin/customers/${customerId}`, 'Prenumeration skapad', () => {
+    const strength = str(form, 'strength');
+    const priceKr = num(form, 'priceKr');
+    const startDate = str(form, 'startDate');
+    createSubscription(c.get('db'), {
+      customerId, boxSize: num(form, 'boxSize') ?? undefined, quantity: num(form, 'quantity') ?? undefined,
+      strength: isStrength(strength) ? strength : null, priceOre: priceKr != null ? Math.round(priceKr * 100) : undefined,
+      startAt: startDate ? new Date(`${startDate}T08:00:00Z`).toISOString() : undefined, paymentMethod: opt(form, 'paymentMethod'),
+    }, c.get('actor'));
   });
 });

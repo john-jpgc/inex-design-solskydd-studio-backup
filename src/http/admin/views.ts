@@ -12,6 +12,7 @@ import { availableStock, isLowStock, type Product } from '../../services/product
 import type { StockMovement } from '../../services/inventory.ts';
 import { PAYMENT_STATUS_LABELS, type OrderDetail, type OrderListItem } from '../../services/orders.ts';
 import type { ShipmentDetail, ShipmentListItem } from '../../services/shipments.ts';
+import { SUBSCRIPTION_STATUS_LABELS, type Subscription, type SubscriptionListItem, type SubscriptionStatus } from '../../services/subscriptions.ts';
 import { config } from '../../config.ts';
 
 type Html = HtmlEscapedString | Promise<HtmlEscapedString>;
@@ -29,7 +30,7 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;p
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;background:#e8e6e0;color:#3d3d39;white-space:nowrap}
 .badge.pending{background:#fef3c7;color:#92400e}.badge.paid{background:#dbeafe;color:#1e40af}.badge.picking{background:#ede9fe;color:#5b21b6}.badge.packed{background:#e0f2fe;color:#075985}.badge.shipped{background:#d1fae5;color:#065f46}.badge.delivered{background:#bbf7d0;color:#14532d}.badge.cancelled{background:#fee2e2;color:#991b1b}.badge.returned{background:#fde68a;color:#78350f}
 .badge.in_transit{background:#d1fae5;color:#065f46}.badge.at_pickup_point{background:#e0f2fe;color:#075985}.badge.failed{background:#fee2e2;color:#991b1b}.badge.refund_due{background:#fee2e2;color:#991b1b}.badge.refunded{background:#e8e6e0}.badge.unpaid{background:#fef3c7;color:#92400e}
-.badge.low{background:#fee2e2;color:#991b1b}
+.badge.low{background:#fee2e2;color:#991b1b}.badge.active{background:#bbf7d0;color:#14532d}.badge.paused{background:#fef3c7;color:#92400e}.badge.label_printed{background:#e0f2fe;color:#075985}.badge.created{background:#e8e6e0}
 form.inline{display:inline}button,.btn{background:var(--accent);color:var(--accent-ink);border:0;padding:7px 14px;border-radius:7px;font-size:14px;cursor:pointer;text-decoration:none;display:inline-block;line-height:1.3}button.secondary,.btn.secondary{background:#e8e6e0;color:var(--ink)}button.danger{background:var(--danger)}button.warn{background:var(--warn)}button:disabled{opacity:.5;cursor:not-allowed}
 input,select,textarea{font:inherit;padding:7px 9px;border:1px solid #c9c7c0;border-radius:7px;background:#fff;width:100%}textarea{min-height:70px}label{display:block;font-size:13px;color:var(--muted);margin-bottom:3px}.field{margin-bottom:10px}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}.row .field{flex:1;min-width:120px;margin-bottom:0}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .flash{padding:10px 14px;border-radius:8px;margin-bottom:16px}.flash.ok{background:#d1fae5;color:#065f46}.flash.err{background:#fee2e2;color:#991b1b}
@@ -58,6 +59,7 @@ export function shipmentBadge(status: ShipmentStatus): Html {
 const NAV: [string, string][] = [
   ['/admin', 'Översikt'],
   ['/admin/orders', 'Ordrar'],
+  ['/admin/subscriptions', 'Prenumerationer'],
   ['/admin/shipments', 'Försändelser'],
   ['/admin/products', 'Produkter & lager'],
   ['/admin/customers', 'Kunder'],
@@ -113,7 +115,7 @@ ${opts.error ? html`<div class="flash err">${opts.error}</div>` : ''}
 
 export function dashboardPage(
   staff: StaffUser,
-  data: { counts: Record<OrderStatus, number>; queue: OrderListItem[]; lowStock: Product[]; refundDue: OrderListItem[]; unpaid: OrderListItem[] },
+  data: { counts: Record<OrderStatus, number>; queue: OrderListItem[]; lowStock: Product[]; refundDue: OrderListItem[]; unpaid: OrderListItem[]; subs: { active: number; paused: number; dueWithin7Days: number }; labelProvider: { id: string; name: string; configured: boolean } },
 ): Html {
   const c = data.counts;
   const stat = (n: number, label: string, href: string) => html`<a class="card stat" href="${href}"><div class="n">${n}</div><div class="l">${label}</div></a>`;
@@ -128,7 +130,11 @@ export function dashboardPage(
   ${stat(data.refundDue.length, 'Återbetalning väntar', '/admin/orders?refund=due')}
   ${stat(data.lowStock.length, 'Produkter med lågt lager', '/admin/products?lowStock=1')}
   ${stat(c.delivered, 'Levererade totalt', '/admin/orders?status=delivered')}
+  ${stat(data.subs.active, 'Aktiva prenumerationer', '/admin/subscriptions?status=active')}
+  ${stat(data.subs.dueWithin7Days, 'Förnyas inom 7 dagar', '/admin/subscriptions?status=active')}
+  ${stat(data.subs.paused, 'Pausade prenumerationer', '/admin/subscriptions?status=paused')}
 </div>
+${data.labelProvider.id !== 'manual' && !data.labelProvider.configured ? html`<div class="flash err">Etikettleverantören ${data.labelProvider.name} är vald men saknar nycklar – se .env.example.</div>` : ''}
 <div class="grid cols-2">
 <div class="card"><h2 style="margin-top:0">Plockkö</h2>${orderTable(data.queue, { compact: true })}</div>
 <div class="card"><h2 style="margin-top:0">Lågt lager (≤ ${config.lowStockThreshold} st)</h2>
@@ -173,7 +179,8 @@ ${ORDER_STATUSES.map((s) => filter(s, STATUS_LABELS[s]))}
 `, { path: '/admin/orders', msg: data.msg, err: data.err });
 }
 
-export function orderPage(staff: StaffUser, order: OrderDetail, products: Product[], opts: { msg?: string; err?: string } = {}): Html {
+export function orderPage(staff: StaffUser, order: OrderDetail, products: Product[], opts: { msg?: string; err?: string; labelProvider?: { id: string; name: string; configured: boolean } } = {}): Html {
+  const canBookLabel = Boolean(opts.labelProvider?.configured);
   const next = allowedTransitions(order.status);
   const can = (s: OrderStatus) => next.includes(s);
   const action = (name: string, label: string, cls = '') =>
@@ -208,7 +215,8 @@ ${can('shipped') ? html`
   <div class="field"><label>Ombud / box</label><input name="pickupPoint"></div>
   <div class="field" style="max-width:110px"><label>Vikt (g)</label><input name="weightGrams" type="number" min="1" placeholder="auto"></div>
   <div class="field" style="flex:0"><button type="submit">Registrera som skickad</button></div>
-</form>` : ''}
+</form>
+${canBookLabel ? html`<p class="small muted">Lämnas kollinumret tomt bokas försändelsen automatiskt hos ${opts.labelProvider?.name} och etiketten kan skrivas ut direkt.</p>` : html`<p class="small muted">Ingen etikettleverantör är kopplad (LABEL_PROVIDER=manual) – skriv in kollinumret från transportörens system.</p>`}` : ''}
 </div>
 
 <div class="grid cols-2">
@@ -242,7 +250,7 @@ ${l.picks.map((p) => html`<tr><td><span class="mono">${p.sku}</span> ${p.brand} 
 <dt>Preferenser</dt><dd>${order.customer.prefStrength ? STRENGTH_LABELS[order.customer.prefStrength] : '–'}${order.customer.prefFlavors.length ? html` · gillar: ${order.customer.prefFlavors.join(', ')}` : ''}${order.customer.excludedFlavors.length ? html` · <span style="color:var(--danger)">undviker: ${order.customer.excludedFlavors.join(', ')}</span>` : ''}</dd>
 <dt>Ålder</dt><dd>${order.ageVerified ? 'Verifierad vid köp' : 'Enligt födelsedatum'} (${order.customer.birthDate})</dd>
 <dt>Betalning</dt><dd>${order.paymentMethod ?? '–'}${order.paymentRef ? html` <span class="mono">${order.paymentRef}</span>` : ''}</dd>
-<dt>Kanal</dt><dd>${order.channel}${order.externalRef ? html` · <span class="mono">${order.externalRef}</span>` : ''}</dd>
+<dt>Kanal</dt><dd>${order.channel}${order.externalRef ? html` · <span class="mono">${order.externalRef}</span>` : ''}${order.subscriptionId ? html` · <a href="/admin/subscriptions/${order.subscriptionId}">Prenumeration #${order.subscriptionId}</a>${order.period ? ` (${order.period})` : ''}` : ''}</dd>
 <dt>Lagd</dt><dd>${fmtDate(order.placedAt)}</dd>
 ${order.customerNote ? html`<dt>Kundens meddelande</dt><dd>${order.customerNote}</dd>` : ''}
 </dl>
@@ -253,6 +261,7 @@ ${order.customerNote ? html`<dt>Kundens meddelande</dt><dd>${order.customerNote}
 ${order.shipments.length === 0 ? html`<p class="muted">Inga försändelser ännu.</p>` : order.shipments.map((s) => html`<p>${CARRIER_LABELS[s.carrier]}${s.service ? ` · ${s.service}` : ''} ${shipmentBadge(s.status)}<br>
 ${s.trackingNumber ? html`<span class="mono">${s.trackingUrl ? html`<a href="${s.trackingUrl}" target="_blank" rel="noopener">${s.trackingNumber}</a>` : s.trackingNumber}</span>` : html`<span class="muted small">Inget kollinummer</span>`}
 ${s.pickupPoint ? html`<br><span class="small">Ombud: ${s.pickupPoint}</span>` : ''}${s.weightGrams ? html` <span class="small muted">· ${s.weightGrams} g</span>` : ''}
+${s.labelCreatedAt ? html`<br><a class="btn secondary" style="padding:3px 10px;font-size:13px" href="/api/v1/shipments/${s.id}/label" target="_blank">Skriv ut etikett (${s.labelFormat ?? ''})</a> <span class="small muted">via ${s.labelProvider}</span>` : canBookLabel ? html`<br><form class="inline" method="post" action="/admin/shipments/${s.id}/label"><button type="submit" style="padding:3px 10px;font-size:13px">Boka & skapa etikett (${opts.labelProvider?.name})</button></form>` : ''}
 <br><a class="small" href="/admin/shipments#s${s.id}">Hantera händelser</a></p>`)}
 </div>
 
@@ -347,12 +356,28 @@ export function newCustomerPage(staff: StaffUser, opts: { err?: string; values?:
   return layout(staff, 'Ny kund', html`<h1>Ny kund</h1><div class="card">${customerForm(opts.values ?? {}, '/admin/customers/new', 'Skapa kund')}</div>`, { path: '/admin/customers', err: opts.err });
 }
 
-export function customerPage(staff: StaffUser, customer: Customer, orders: OrderListItem[], opts: { msg?: string; err?: string } = {}): Html {
+export function customerPage(staff: StaffUser, customer: Customer, orders: OrderListItem[], subscriptions: Subscription[], opts: { msg?: string; err?: string } = {}): Html {
   return layout(staff, fullName(customer), html`
 <h1>${fullName(customer)} ${customer.status === 'blocked' ? html`<span class="badge cancelled">Spärrad</span>` : ''}</h1>
 <div class="grid cols-2">
 <div class="card"><h2 style="margin-top:0">Uppgifter</h2>${customerForm(customer, `/admin/customers/${customer.id}`, 'Spara')}</div>
+<div>
+<div class="card"><h2 style="margin-top:0">Prenumerationer</h2>
+${subscriptions.length === 0 ? html`<p class="muted">Ingen prenumeration.</p>` : html`<table><tr><th>#</th><th>Box</th><th>Status</th><th>Nästa box</th><th class="num">Pris/mån</th></tr>
+${subscriptions.map((s) => html`<tr><td><a href="/admin/subscriptions/${s.id}">#${s.id}</a></td><td>${s.boxSize} dosor × ${s.quantity}${s.strength ? html` <span class="small muted">${STRENGTH_LABELS[s.strength]}</span>` : ''}</td><td>${subscriptionBadge(s.status)}</td><td class="small">${fmtDate(s.nextRenewalAt)}</td><td class="num">${formatSek(s.priceOre)}</td></tr>`)}</table>`}
+<details style="margin-top:10px"><summary class="small">+ Ny prenumeration</summary>
+<form method="post" action="/admin/customers/${customer.id}/subscriptions" class="row" style="margin-top:8px">
+<div class="field"><label>Dosor/box</label><input type="number" name="boxSize" value="${config.defaultBoxSize}" min="1"></div>
+<div class="field"><label>Antal boxar</label><input type="number" name="quantity" value="1" min="1"></div>
+<div class="field"><label>Styrka</label><select name="strength"><option value="">Kundens preferens</option>${STRENGTHS.map((st) => html`<option value="${st}">${STRENGTH_LABELS[st]}</option>`)}</select></div>
+<div class="field"><label>Pris/mån (kr)</label><input type="number" step="0.01" name="priceKr" placeholder="${((config.mysteryBoxPricesOre[config.defaultBoxSize] ?? 0) / 100).toFixed(0)}"></div>
+<div class="field"><label>Första box</label><input type="date" name="startDate" value="${new Date().toISOString().slice(0, 10)}"></div>
+<div class="field"><label>Betalsätt</label><input name="paymentMethod" placeholder="klarna / kort"></div>
+<div class="field" style="flex:0"><button type="submit">Skapa</button></div>
+</form></details>
+</div>
 <div class="card"><h2 style="margin-top:0">Ordrar</h2>${orderTable(orders, { compact: true })}<p class="small muted">Kund sedan ${fmtDate(customer.createdAt)}</p></div>
+</div>
 </div>`, { path: '/admin/customers', ...opts });
 }
 
@@ -439,4 +464,62 @@ ${data.shipments.map((s) => html`<tr id="s${s.id}">
 
 export function shipmentDetailFragment(s: ShipmentDetail): Html {
   return html`<ul class="timeline">${s.events.map((e) => html`<li><span class="t">${fmtDate(e.occurredAt)}</span>${SHIPMENT_STATUS_LABELS[e.status] ?? e.status}${e.location ? ` – ${e.location}` : ''}${e.description ? html` <span class="muted">${e.description}</span>` : ''}</li>`)}</ul>`;
+}
+
+/* ---------- Prenumerationer ---------- */
+
+export function subscriptionBadge(status: SubscriptionStatus): Html {
+  return html`<span class="badge ${status}">${SUBSCRIPTION_STATUS_LABELS[status]}</span>`;
+}
+
+export function subscriptionsPage(staff: StaffUser, data: { subscriptions: SubscriptionListItem[]; status?: string; q?: string; msg?: string; err?: string }): Html {
+  const filter = (value: string | undefined, label: string) =>
+    html`<a href="/admin/subscriptions${value ? `?status=${value}` : ''}" class="${(data.status ?? '') === (value ?? '') ? 'active' : ''}">${label}</a>`;
+  const nowIso = new Date().toISOString();
+  return layout(staff, 'Prenumerationer', html`
+<h1>Prenumerationer</h1>
+<div class="filters">${filter(undefined, 'Alla')}${filter('active', 'Aktiva')}${filter('paused', 'Pausade')}${filter('cancelled', 'Avslutade')}
+<form method="post" action="/admin/subscriptions/renew-due" style="margin-left:0"><button type="submit" class="secondary">Skapa förfallna månadsordrar nu</button></form>
+<form method="get" action="/admin/subscriptions"><input type="search" name="q" placeholder="Sök namn, e-post, referens…" value="${data.q ?? ''}"><button type="submit" class="secondary">Sök</button></form></div>
+<div class="card">
+${data.subscriptions.length === 0 ? html`<p class="muted">Inga prenumerationer.</p>` : html`<table>
+<tr><th>#</th><th>Kund</th><th>Box</th><th>Status</th><th>Nästa box</th><th>Senast</th><th class="num">Pris/mån</th><th class="num">Ordrar</th></tr>
+${data.subscriptions.map((s) => html`<tr>
+<td><a href="/admin/subscriptions/${s.id}">#${s.id}</a>${s.externalRef ? html`<div class="small muted mono">${s.externalRef}</div>` : ''}</td>
+<td><a href="/admin/customers/${s.customerId}">${s.customerName}</a><div class="small muted">${s.customerEmail}</div></td>
+<td>${s.boxSize} dosor × ${s.quantity}${s.strength ? html`<div class="small muted">${STRENGTH_LABELS[s.strength]}</div>` : ''}</td>
+<td>${subscriptionBadge(s.status)}${s.lastError ? html`<div class="small" style="color:var(--danger)">${s.lastError}</div>` : ''}</td>
+<td class="small">${fmtDate(s.nextRenewalAt)}${s.status === 'active' && s.nextRenewalAt <= nowIso ? html` <span class="badge pending">Förfallen</span>` : ''}</td>
+<td class="small">${fmtDate(s.lastRenewedAt)}</td><td class="num">${formatSek(s.priceOre)}</td><td class="num">${s.orderCount}</td>
+</tr>`)}</table>`}
+</div>
+<p class="small muted">Månadsordrar skapas automatiskt av servern när förnyelsedatumet passerat, eller via <span class="mono">POST /api/v1/subscriptions/:id/renew</span> från betalleverantörens webhook.</p>
+`, { path: '/admin/subscriptions', msg: data.msg, err: data.err });
+}
+
+export function subscriptionPage(staff: StaffUser, sub: Subscription, customer: Customer, orders: OrderListItem[], opts: { msg?: string; err?: string } = {}): Html {
+  const action = (name: string, label: string, cls = '') =>
+    html`<form class="inline" method="post" action="/admin/subscriptions/${sub.id}/actions/${name}"><button type="submit" class="${cls}">${label}</button></form>`;
+  return layout(staff, `Prenumeration #${sub.id}`, html`
+<h1>Prenumeration #${sub.id} ${subscriptionBadge(sub.status)}</h1>
+<div class="card no-print"><h2 style="margin-top:0">Åtgärder</h2><div class="actions">
+${sub.status !== 'cancelled' ? action('renew', 'Skapa månadens order nu') : ''}
+${sub.status === 'active' ? action('pause', 'Pausa', 'secondary') : ''}
+${sub.status === 'paused' ? action('resume', 'Återuppta') : ''}
+${sub.status !== 'cancelled' ? html`<form class="inline" method="post" action="/admin/subscriptions/${sub.id}/actions/cancel" onsubmit="return confirm('Avsluta prenumerationen?')"><button type="submit" class="danger">Avsluta</button></form>` : ''}
+</div>${sub.lastError ? html`<p style="color:var(--danger)">Senaste förnyelsen misslyckades: ${sub.lastError}</p>` : ''}</div>
+<div class="grid cols-2">
+<div class="card"><h2 style="margin-top:0">Inställningar</h2>
+<form method="post" action="/admin/subscriptions/${sub.id}">
+<div class="row"><div class="field"><label>Dosor/box</label><input type="number" name="boxSize" value="${sub.boxSize}" min="1"></div><div class="field"><label>Antal boxar</label><input type="number" name="quantity" value="${sub.quantity}" min="1"></div>
+<div class="field"><label>Styrka</label><select name="strength"><option value="">Kundens preferens</option>${STRENGTHS.map((st) => html`<option value="${st}" ${sub.strength === st ? 'selected' : ''}>${STRENGTH_LABELS[st]}</option>`)}</select></div></div>
+<div class="row"><div class="field"><label>Pris/period (kr)</label><input type="number" step="0.01" name="priceKr" value="${(sub.priceOre / 100).toFixed(2)}"></div><div class="field"><label>Intervall (mån)</label><input type="number" name="intervalMonths" value="${sub.intervalMonths}" min="1" max="12"></div>
+<div class="field"><label>Nästa box</label><input type="date" name="nextRenewalDate" value="${sub.nextRenewalAt.slice(0, 10)}"></div></div>
+<div class="row"><div class="field"><label>Betalsätt</label><input name="paymentMethod" value="${sub.paymentMethod ?? ''}"></div><div class="field"><label>Referens hos betalleverantör</label><input name="externalRef" value="${sub.externalRef ?? ''}"></div></div>
+<div class="field"><label>Anteckningar</label><textarea name="notes">${sub.notes ?? ''}</textarea></div>
+<div class="actions"><button type="submit">Spara</button></div></form>
+<dl style="margin-top:12px"><dt>Kund</dt><dd><a href="/admin/customers/${customer.id}">${fullName(customer)}</a> · ${customer.email}</dd><dt>Startad</dt><dd>${fmtDate(sub.startedAt)}</dd><dt>Senast förnyad</dt><dd>${fmtDate(sub.lastRenewedAt)}</dd>${sub.cancelledAt ? html`<dt>Avslutad</dt><dd>${fmtDate(sub.cancelledAt)}</dd>` : ''}</dl>
+</div>
+<div class="card"><h2 style="margin-top:0">Skapade ordrar</h2>${orderTable(orders, { compact: true })}</div>
+</div>`, { path: '/admin/subscriptions', ...opts });
 }

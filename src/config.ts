@@ -17,12 +17,44 @@ export const config = {
     freeThresholdOre: 49_900,
     standardOre: 4_900,
   },
-  /** Standardpriser (öre, inkl. moms) per boxstorlek när webbshopen inte skickar pris. */
+  /** Antal dosor i en standardbox (skickas en gång i månaden). */
+  defaultBoxSize: 4,
+  /**
+   * Standardpriser (öre, inkl. moms) per boxstorlek när webbshopen inte skickar pris.
+   * OBS: 249 kr är ett platshållarpris – sätt det verkliga priset här.
+   */
   mysteryBoxPricesOre: {
-    5: 19_900,
-    10: 34_900,
-    20: 64_900,
+    4: 24_900,
   } as Record<number, number>,
+  subscription: {
+    /** Hur ofta förnyelser körs automatiskt i servern (ms). */
+    renewalIntervalMs: 60 * 60 * 1000,
+  },
+  /** Etikettleverantör: "manual" (kollinummer skrivs in för hand), "nshift" eller "postnord". */
+  labelProvider: env.LABEL_PROVIDER ?? 'manual',
+  /** Avsändaradress som skrivs på fraktetiketter. */
+  sender: {
+    name: env.SENDER_NAME ?? 'Mysterysnus',
+    street: env.SENDER_STREET ?? '',
+    postalCode: env.SENDER_POSTAL_CODE ?? '',
+    city: env.SENDER_CITY ?? '',
+    country: env.SENDER_COUNTRY ?? 'SE',
+    phone: env.SENDER_PHONE ?? '',
+    email: env.SENDER_EMAIL ?? '',
+  },
+  nshift: {
+    baseUrl: env.NSHIFT_BASE_URL ?? 'https://api.unifaun.com/rs-extapi/v1',
+    apiId: env.NSHIFT_API_ID ?? '',
+    apiSecret: env.NSHIFT_API_SECRET ?? '',
+    /** Avsändar-id ("sender quick id") i nShift/Unifaun. */
+    senderId: env.NSHIFT_SENDER_ID ?? '',
+  },
+  postnord: {
+    baseUrl: env.POSTNORD_BASE_URL ?? 'https://api2.postnord.com',
+    apiKey: env.POSTNORD_API_KEY ?? '',
+    /** PostNord-kundnummer som fraktavtalet är knutet till. */
+    customerNumber: env.POSTNORD_CUSTOMER_NUMBER ?? '',
+  },
   /** Lagernivå där en produkt flaggas som "lågt lager" i admin. */
   lowStockThreshold: 10,
 };

@@ -28,14 +28,14 @@ test('fullständigt orderflöde: skapa → betala → plocka → packa → skick
     customerId: customer.id,
     lines: [
       { kind: 'product', sku: 'VELO-MINT', quantity: 2 },
-      { kind: 'mystery_box', boxSize: 5, quantity: 1 },
+      { kind: 'mystery_box', boxSize: 4, quantity: 1 },
     ],
     paymentMethod: 'swish',
   });
 
   assert.equal(order.orderNumber, 'MS-000001');
   assert.equal(order.status, 'pending');
-  assert.equal(order.subtotalOre, 2 * 4_900 + 19_900);
+  assert.equal(order.subtotalOre, 2 * 4_900 + 24_900);
   assert.equal(order.shippingOre, 4_900, 'under fri frakt-gränsen');
   assert.equal(order.totalOre, order.subtotalOre + 4_900);
   assert.equal(order.vatOre, Math.round((order.totalOre * 0.2)));
@@ -48,13 +48,13 @@ test('fullständigt orderflöde: skapa → betala → plocka → packa → skick
   const picking = startPicking(db, order.id, 'test');
   assert.equal(picking.status, 'picking');
   const box = picking.lines.find((l) => l.kind === 'mystery_box')!;
-  assert.equal(box.picks.reduce((s, p) => s + p.quantity, 0), 5, 'boxen får 5 dosor föreslagna');
+  assert.equal(box.picks.reduce((s, p) => s + p.quantity, 0), 4, 'boxen får 4 dosor föreslagna');
 
   const packed = pack(db, order.id, 'test');
   assert.equal(packed.status, 'packed');
   assert.equal(getProduct(db, p1.id).stockReserved, 0);
   const totalOnHand = [p1, p2].reduce((s, p) => s + getProduct(db, p.id).stockOnHand, 0) + getProduct(db, 3).stockOnHand;
-  assert.equal(totalOnHand, 60 - 2 - 5, 'lagret dras vid packning');
+  assert.equal(totalOnHand, 60 - 2 - 4, 'lagret dras vid packning');
 
   const shipped = ship(db, order.id, { carrier: 'postnord', trackingNumber: 'PN123' }, 'test');
   assert.equal(shipped.status, 'shipped');
@@ -121,7 +121,7 @@ test('packning stoppas om boxen är ofullständig och manuell justering fungerar
   const db = testDb();
   const customer = seedCustomer(db);
   const p = seedProduct(db, 'A', 2);
-  const order = createOrder(db, { customerId: customer.id, lines: [{ kind: 'mystery_box', boxSize: 5, quantity: 1 }], paymentStatus: 'paid' });
+  const order = createOrder(db, { customerId: customer.id, lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }], paymentStatus: 'paid' });
   const picking = startPicking(db, order.id);
   assert.ok(picking.events.some((e) => e.type === 'warning'), 'varnar om lagerbrist');
   assert.throws(() => pack(db, order.id), (err: unknown) => err instanceof AppError && err.code === 'BOX_INCOMPLETE');
@@ -130,13 +130,13 @@ test('packning stoppas om boxen är ofullständig och manuell justering fungerar
   const line = picking.lines[0]!;
   const adjusted = setBoxPicks(db, order.id, line.id, [
     { productId: p.id, quantity: 2 },
-    { productId: 2, quantity: 3 },
+    { productId: 2, quantity: 2 },
   ]);
-  assert.equal(adjusted.lines[0]!.picks.reduce((s, x) => s + x.quantity, 0), 5);
+  assert.equal(adjusted.lines[0]!.picks.reduce((s, x) => s + x.quantity, 0), 4);
   const packed = pack(db, order.id);
   assert.equal(packed.status, 'packed');
   assert.equal(getProduct(db, p.id).stockOnHand, 0);
-  assert.equal(getProduct(db, 2).stockOnHand, 7);
+  assert.equal(getProduct(db, 2).stockOnHand, 8);
 });
 
 test('retur med återföring lägger tillbaka lagret', () => {

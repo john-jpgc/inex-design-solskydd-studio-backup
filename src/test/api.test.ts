@@ -33,7 +33,7 @@ test('order kan skapas och drivas genom hela flödet via API', async () => {
     customer: { email: 'api@example.com', firstName: 'Api', lastName: 'Testsson', birthDate: '1990-01-01' },
     shippingAddress: { street: 'Testgatan 1', postalCode: '111 22', city: 'Stockholm' },
     lines: [
-      { kind: 'mystery_box', boxSize: 5, quantity: 1 },
+      { kind: 'mystery_box', boxSize: 4, quantity: 1 },
       { kind: 'product', sku: 'ZYN-COOL-MINT-S', quantity: 2 },
     ],
     paymentStatus: 'paid',
@@ -47,7 +47,7 @@ test('order kan skapas och drivas genom hela flödet via API', async () => {
   const dup = await post(app, '/api/v1/orders', {
     customer: { email: 'api@example.com', firstName: 'Api', lastName: 'Testsson', birthDate: '1990-01-01' },
     shippingAddress: { street: 'Testgatan 1', postalCode: '11122', city: 'Stockholm' },
-    lines: [{ kind: 'mystery_box', boxSize: 5, quantity: 1 }],
+    lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }],
     externalRef: 'SHOP-42',
   });
   assert.equal(dup.status, 409);

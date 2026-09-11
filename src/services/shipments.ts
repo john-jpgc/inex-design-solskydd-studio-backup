@@ -5,6 +5,9 @@ import { invalid, notFound } from '../domain/errors.ts';
 import { isCarrier, trackingUrl, type Carrier, type ShipmentStatus } from '../domain/carriers.ts';
 import { addOrderEvent, getOrder, markDelivered, markReturned } from './orders.ts';
 
+const SHIPMENT_COLUMNS =
+  'id, order_id, carrier, service, tracking_number, tracking_url, status, weight_grams, pickup_point, shipped_at, delivered_at, label_provider, label_ref, label_format, label_created_at, created_at, updated_at';
+
 export interface Shipment {
   id: number;
   orderId: number;
@@ -17,6 +20,10 @@ export interface Shipment {
   pickupPoint: string | null;
   shippedAt: string | null;
   deliveredAt: string | null;
+  labelProvider: string | null;
+  labelRef: string | null;
+  labelFormat: string | null;
+  labelCreatedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -55,7 +62,7 @@ export function createShipment(db: Db, orderId: number, input: ShipmentInput): S
   if (!isCarrier(input.carrier)) throw invalid('INVALID_CARRIER', `Okänd transportör: ${String(input.carrier)}`);
   const ts = now();
   const tn = input.trackingNumber?.trim() || null;
-  const status = input.status ?? 'in_transit';
+  const status = input.status ?? (tn ? 'in_transit' : 'created');
   const result = db
     .prepare(
       `INSERT INTO shipments (order_id, carrier, service, tracking_number, tracking_url, status, weight_grams, pickup_point, shipped_at, created_at, updated_at)
@@ -74,7 +81,7 @@ export function createShipment(db: Db, orderId: number, input: ShipmentInput): S
 
 export function getShipment(db: Db, id: number): ShipmentDetail {
   const row = db
-    .prepare('SELECT s.*, o.order_number FROM shipments s JOIN orders o ON o.id = s.order_id WHERE s.id = ?')
+    .prepare('SELECT s.id, s.order_id, s.carrier, s.service, s.tracking_number, s.tracking_url, s.status, s.weight_grams, s.pickup_point, s.shipped_at, s.delivered_at, s.label_provider, s.label_ref, s.label_format, s.label_created_at, s.created_at, s.updated_at, o.order_number FROM shipments s JOIN orders o ON o.id = s.order_id WHERE s.id = ?')
     .get(id) as Record<string, unknown> | undefined;
   const s = toCamel<ShipmentDetail>(row);
   if (!s) throw notFound('Försändelse', id);
@@ -89,7 +96,7 @@ export function getShipment(db: Db, id: number): ShipmentDetail {
 
 export function listShipmentsForOrder(db: Db, orderId: number): Shipment[] {
   return toCamelAll<Shipment>(
-    db.prepare('SELECT * FROM shipments WHERE order_id = ? ORDER BY created_at DESC').all(orderId) as Record<string, unknown>[],
+    db.prepare(`SELECT ${SHIPMENT_COLUMNS} FROM shipments WHERE order_id = ? ORDER BY created_at DESC`).all(orderId) as Record<string, unknown>[],
   );
 }
 
@@ -121,7 +128,7 @@ export function listShipments(
   }
   const rows = db
     .prepare(
-      `SELECT s.*, o.order_number, o.ship_name, o.ship_city
+      `SELECT ${SHIPMENT_COLUMNS.replace(/(^|, )/g, '$1s.')}, o.order_number, o.ship_name, o.ship_city
        FROM shipments s JOIN orders o ON o.id = s.order_id
        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY s.created_at DESC LIMIT ? OFFSET ?`,
