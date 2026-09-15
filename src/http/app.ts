@@ -6,6 +6,7 @@ import { AppError } from '../domain/errors.ts';
 import type { AppEnv } from './types.ts';
 import { loadSession } from './middleware.ts';
 import { api } from './api/index.ts';
+import { publicRoutes } from './public.ts';
 import { admin } from './admin/routes.ts';
 import { errorPage } from './admin/views.ts';
 
@@ -22,6 +23,7 @@ export function createApp(db: Db, opts: { log?: boolean } = {}): Hono<AppEnv> {
   app.use('*', loadSession);
 
   app.get('/', (c) => c.redirect('/admin'));
+  app.route('/', publicRoutes);
   app.route('/api/v1', api);
   app.route('/admin', admin);
 

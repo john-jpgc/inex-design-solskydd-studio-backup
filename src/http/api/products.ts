@@ -5,6 +5,8 @@ import { idParam, paging, parseJson, parseQuery } from '../validate.ts';
 import { productPatchSchema, productSchema, stockAdjustSchema } from '../schemas.ts';
 import { availableStock, createProduct, getProduct, listProducts, updateProduct } from '../../services/products.ts';
 import { adjustStock, listMovements } from '../../services/inventory.ts';
+import { listLinksForProduct } from '../../services/retailers.ts';
+import { productHistory } from '../../services/reports.ts';
 
 const listQuery = paging.extend({
   active: z.enum(['true', 'false']).optional(),
@@ -43,6 +45,13 @@ export const productsApi = new Hono<AppEnv>()
     });
     return c.json({ product: withAvailable(product) });
   })
+  .get('/:id/retailers', (c) => {
+    const q = parseQuery(c, z.object({ customerToken: z.string().trim().max(100).optional(), period: z.string().regex(/^\d{4}-\d{2}$/).optional() }));
+    const links = listLinksForProduct(c.get('db'), idParam(c), q);
+    return c.json({ links: links.map((l) => ({ retailerId: l.retailerId, retailer: l.retailerName, priceOre: l.priceOre, url: l.trackingUrl })) });
+  })
+  /** Hur produkten tagits emot i de boxar den ingått i. */
+  .get('/:id/history', (c) => c.json({ history: productHistory(c.get('db'), idParam(c)) }))
   .get('/:id/movements', (c) => {
     const id = idParam(c);
     getProduct(c.get('db'), id);

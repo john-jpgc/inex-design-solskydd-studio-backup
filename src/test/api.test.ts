@@ -106,3 +106,94 @@ test('admin kräver inloggning och inloggning ger session', async () => {
   assert.equal(dash.status, 200);
   assert.match(await dash.text(), /Översikt/);
 });
+
+test('hemsidans flöde: box, betyg via token och köplänkar', async () => {
+  const db = testDb();
+  process.env.ADMIN_PASSWORD = 'hemligt123';
+  seedAdmin(db);
+  seedProducts(db);
+  const app = createApp(db);
+
+  // Sätt ihop och lås månadens box.
+  const created = await post(app, '/api/v1/editions', { period: '2026-10', description: 'Mintspecial' });
+  assert.equal(created.status, 201);
+  const { edition } = (await created.json()) as { edition: { id: number } };
+
+  const products = (await (await app.request('/api/v1/products?active=true', { headers: HEADERS })).json()) as {
+    products: { id: number; sku: string }[];
+  };
+  const chosen = products.products.slice(0, 4);
+  const withItems = await app.request(`/api/v1/editions/${edition.id}/items`, {
+    method: 'PUT',
+    headers: HEADERS,
+    body: JSON.stringify({ items: chosen.map((p) => ({ productId: p.id, quantity: 1 })) }),
+  });
+  assert.equal(withItems.status, 200);
+  assert.equal((await post(app, `/api/v1/editions/${edition.id}/lock`, {})).status, 200);
+
+  // Kunden får boxen.
+  const orderRes = await post(app, '/api/v1/orders', {
+    customer: { email: 'webb@example.com', firstName: 'Web', lastName: 'Kund', birthDate: '1990-01-01' },
+    shippingAddress: { street: 'Gatan 1', postalCode: '11122', city: 'Stockholm' },
+    lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }],
+    editionId: edition.id,
+    paymentStatus: 'paid',
+  });
+  const { order } = (await orderRes.json()) as { order: { id: number; customerId: number; lines: { picks: unknown[] }[] } };
+  await post(app, `/api/v1/orders/${order.id}/pick`, {});
+  await post(app, `/api/v1/orders/${order.id}/pack`, {});
+  await post(app, `/api/v1/orders/${order.id}/ship`, { carrier: 'postnord', trackingNumber: 'PN-9' });
+
+  const customerRes = await app.request(`/api/v1/customers/${order.customerId}`, { headers: HEADERS });
+  const { customer } = (await customerRes.json()) as { customer: { publicToken: string } };
+  assert.match(customer.publicToken, /^[0-9a-f]{32}$/);
+
+  // Kunden betygsätter via sin publika token, utan att hemsidan känner till interna id:n.
+  const rated = await post(app, '/api/v1/ratings', {
+    customerToken: customer.publicToken,
+    period: '2026-10',
+    productId: chosen[0]!.id,
+    rating: 5,
+    sentiment: 'like',
+    wouldBuyAgain: true,
+    comment: 'Bästa hittills',
+  });
+  assert.equal(rated.status, 201);
+
+  const mine = await app.request(`/api/v1/ratings?customerToken=${customer.publicToken}&period=2026-10`, { headers: HEADERS });
+  const mineBody = (await mine.json()) as { received: boolean; ratings: { sku: string }[] };
+  assert.equal(mineBody.received, true);
+  assert.equal(mineBody.ratings.length, 1);
+
+  // Köplänk för produkten i boxen, med spårning kopplad till kund och period.
+  const retailer = await post(app, '/api/v1/retailers', { name: 'Butiken', website: 'https://butiken.example' });
+  const { retailer: r } = (await retailer.json()) as { retailer: { id: number } };
+  await app.request('/api/v1/retailers/links', {
+    method: 'PUT',
+    headers: HEADERS,
+    body: JSON.stringify({ retailerId: r.id, productId: chosen[0]!.id, url: 'https://butiken.example/produkt' }),
+  });
+
+  const linksRes = await app.request(`/api/v1/editions/${edition.id}/retail-links?customerToken=${customer.publicToken}`, { headers: HEADERS });
+  const links = (await linksRes.json()) as { products: { productId: number; links: { url: string }[] }[] };
+  const trackingUrl = links.products.find((p) => p.productId === chosen[0]!.id)!.links[0]!.url;
+  assert.match(trackingUrl, new RegExp(`/r/\\d+\\?t=${customer.publicToken}&p=2026-10`));
+
+  // Klicket loggas och rapporten visar både betyg och merköp.
+  const redirect = await app.request(trackingUrl.replace(/^https?:\/\/[^/]*/, ''));
+  assert.equal(redirect.status, 302);
+  const ref = new URL(redirect.headers.get('location')!).searchParams.get('ref')!;
+  assert.equal((await post(app, '/api/v1/retailers/conversions', { ref, valueOre: 4_500 })).status, 200);
+
+  const reportRes = await app.request(`/api/v1/editions/${edition.id}/report`, { headers: HEADERS });
+  const report = (await reportRes.json()) as { boxesShipped: number; products: { productId: number; responses: number; clicks: number; conversions: number }[] };
+  assert.equal(report.boxesShipped, 1);
+  const row = report.products.find((p) => p.productId === chosen[0]!.id)!;
+  assert.equal(row.responses, 1);
+  assert.equal(row.clicks, 1);
+  assert.equal(row.conversions, 1);
+
+  const csv = await app.request(`/api/v1/editions/${edition.id}/report.csv`, { headers: HEADERS });
+  assert.equal(csv.headers.get('content-type'), 'text/csv; charset=utf-8');
+  assert.match(await csv.text(), /Snittbetyg/);
+});

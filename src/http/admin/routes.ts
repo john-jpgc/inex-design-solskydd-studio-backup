@@ -19,9 +19,19 @@ import {
 import { addShipmentEvent, getShipment, listShipments, updateShipment } from '../../services/shipments.ts';
 import { createLabelForShipment, labelProviderStatus } from '../../services/labels.ts';
 import {
-  cancelSubscription, createSubscription, getSubscription, listSubscriptions, pauseSubscription, renewDueSubscriptions,
-  renewSubscription, resumeSubscription, subscriptionCounts, updateSubscription,
+  assignWaves, cancelSubscription, createSubscription, getSubscription, listSubscriptions, pauseSubscription,
+  renewDueSubscriptions, renewSubscription, resumeSubscription, subscriptionCounts, updateSubscription, waveSummary,
 } from '../../services/subscriptions.ts';
+import {
+  archiveEdition, createEdition, editionForecast, getEdition, listEditions, lockEdition,
+  setEditionItem, unlockEdition, updateEdition,
+} from '../../services/editions.ts';
+import { editionReport, editionReportCsv, productHistory } from '../../services/reports.ts';
+import { listComments, listCustomerRatings } from '../../services/ratings.ts';
+import { createRetailer, deleteRetailerLink, listAllLinks, listRetailers, setRetailerLink } from '../../services/retailers.ts';
+import { createSupplier, listSuppliers } from '../../services/suppliers.ts';
+import * as ev from './editionViews.ts';
+import * as rv from './retailViews.ts';
 import { idParam } from '../validate.ts';
 import * as v from './views.ts';
 
@@ -99,7 +109,15 @@ admin.get('/', (c) => {
   const lowStock = listProducts(db, { activeOnly: true, lowStockOnly: true });
   const refundDue = listOrders(db, { limit: 200 }).filter((o) => o.paymentStatus === 'refund_due');
   const unpaid = listOrders(db, { status: 'pending', limit: 10 });
-  return c.html(v.dashboardPage(staff, { counts, queue, lowStock, refundDue, unpaid, subs: subscriptionCounts(db), labelProvider: labelProviderStatus() }));
+  const period = new Date().toISOString().slice(0, 7);
+  const currentEdition = listEditions(db).find((e) => e.period === period);
+  return c.html(
+    v.dashboardPage(staff, {
+      counts, queue, lowStock, refundDue, unpaid,
+      subs: subscriptionCounts(db), labelProvider: labelProviderStatus(),
+      currentEdition, waves: waveSummary(db),
+    }),
+  );
 });
 
 /* ---------- Ordrar ---------- */
@@ -258,7 +276,12 @@ admin.post('/customers/new', async (c) => {
 admin.get('/customers/:id', (c) => {
   const db = c.get('db');
   const id = idParam(c);
-  return c.html(v.customerPage(c.get('staff')!, getCustomer(db, id), listOrders(db, { customerId: id, limit: 100 }), listSubscriptions(db, { customerId: id }), flash(c)));
+  return c.html(
+    v.customerPage(
+      c.get('staff')!, getCustomer(db, id), listOrders(db, { customerId: id, limit: 100 }),
+      listSubscriptions(db, { customerId: id }), listCustomerRatings(db, id), flash(c),
+    ),
+  );
 });
 
 admin.post('/customers/:id', async (c) => {
@@ -281,16 +304,19 @@ function productInputFromForm(form: Form): ProductInput {
     format: (['original', 'slim', 'mini', 'large'] as const).find((f) => f === format) ?? 'slim',
     priceOre: Math.round((num(form, 'priceKr') ?? 0) * 100), vatRate: num(form, 'vatRate') ?? config.vatRate,
     weightGrams: num(form, 'weightGrams') ?? 20, active: str(form, 'active') === '1',
+    supplierId: num(form, 'supplierId'),
   };
 }
 
 admin.get('/products', (c) => {
   const q = c.req.query('q') || undefined;
   const lowStock = c.req.query('lowStock') === '1';
-  return c.html(v.productsPage(c.get('staff')!, { products: listProducts(c.get('db'), { q, lowStockOnly: lowStock }), q, lowStock, ...flash(c) }));
+  const db = c.get('db');
+  const supplierNames = new Map(listSuppliers(db).map((s) => [s.id, s.name]));
+  return c.html(v.productsPage(c.get('staff')!, { products: listProducts(db, { q, lowStockOnly: lowStock }), supplierNames, q, lowStock, ...flash(c) }));
 });
 
-admin.get('/products/new', (c) => c.html(v.newProductPage(c.get('staff')!, flash(c))));
+admin.get('/products/new', (c) => c.html(v.newProductPage(c.get('staff')!, listSuppliers(c.get('db')), flash(c))));
 
 admin.post('/products/new', async (c) => {
   const form = (await c.req.parseBody()) as Form;
@@ -306,7 +332,7 @@ admin.post('/products/new', async (c) => {
 admin.get('/products/:id', (c) => {
   const db = c.get('db');
   const id = idParam(c);
-  return c.html(v.productPage(c.get('staff')!, getProduct(db, id), listMovements(db, id), flash(c)));
+  return c.html(v.productPage(c.get('staff')!, getProduct(db, id), listMovements(db, id), listSuppliers(db), productHistory(db, id), flash(c)));
 });
 
 admin.post('/products/:id', async (c) => {
@@ -373,7 +399,13 @@ admin.get('/subscriptions', (c) => {
   const status = c.req.query('status');
   const q = c.req.query('q') || undefined;
   const valid = status === 'active' || status === 'paused' || status === 'cancelled' ? status : undefined;
-  return c.html(v.subscriptionsPage(c.get('staff')!, { subscriptions: listSubscriptions(c.get('db'), { status: valid, q, limit: 500 }), status: valid, q, ...flash(c) }));
+  const db = c.get('db');
+  return c.html(
+    v.subscriptionsPage(c.get('staff')!, {
+      subscriptions: listSubscriptions(db, { status: valid, q, limit: 500 }),
+      waves: waveSummary(db), waveMode: config.waves.mode, status: valid, q, ...flash(c),
+    }),
+  );
 });
 
 admin.post('/subscriptions/renew-due', (c) => {
@@ -400,7 +432,7 @@ admin.post('/subscriptions/:id', async (c) => {
     updateSubscription(c.get('db'), id, {
       boxSize: num(form, 'boxSize') ?? undefined, quantity: num(form, 'quantity') ?? undefined,
       strength: isStrength(strength) ? strength : null, priceOre: priceKr != null ? Math.round(priceKr * 100) : undefined,
-      intervalMonths: num(form, 'intervalMonths') ?? undefined,
+      intervalMonths: num(form, 'intervalMonths') ?? undefined, wave: num(form, 'wave') ?? undefined,
       nextRenewalAt: nextDate ? new Date(`${nextDate}T08:00:00Z`).toISOString() : undefined,
       paymentMethod: opt(form, 'paymentMethod'), externalRef: opt(form, 'externalRef'), notes: opt(form, 'notes'),
     });
@@ -439,5 +471,144 @@ admin.post('/customers/:id/subscriptions', async (c) => {
       strength: isStrength(strength) ? strength : null, priceOre: priceKr != null ? Math.round(priceKr * 100) : undefined,
       startAt: startDate ? new Date(`${startDate}T08:00:00Z`).toISOString() : undefined, paymentMethod: opt(form, 'paymentMethod'),
     }, c.get('actor'));
+  });
+});
+
+/* ---------- Utskicksvågor ---------- */
+
+admin.post('/waves/assign', (c) =>
+  attempt(c, '/admin/subscriptions', 'Prenumeranterna fördelades i vågor', () => {
+    const result = assignWaves(c.get('db'));
+    if (result.updated === 0) throw new AppError(409, 'NO_CHANGE', 'Inga prenumerationer behövde flyttas');
+  }));
+
+/* ---------- Månadsboxar ---------- */
+
+function suggestedPeriod(): string {
+  const d = new Date();
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().slice(0, 7);
+}
+
+admin.get('/editions', (c) =>
+  c.html(ev.editionsPage(c.get('staff')!, { editions: listEditions(c.get('db')), suggestedPeriod: suggestedPeriod(), ...flash(c) })));
+
+admin.post('/editions', async (c) => {
+  const form = (await c.req.parseBody()) as Form;
+  try {
+    const edition = createEdition(c.get('db'), { period: str(form, 'period'), name: opt(form, 'name') ?? undefined, description: opt(form, 'description') });
+    return redirect(c, `/admin/editions/${edition.id}`, { msg: 'Boxen skapad – lägg till innehållet' });
+  } catch (err) {
+    if (err instanceof AppError) return redirect(c, '/admin/editions', { err: err.message });
+    throw err;
+  }
+});
+
+admin.get('/editions/:id', (c) => {
+  const db = c.get('db');
+  const id = idParam(c);
+  const edition = getEdition(db, id);
+  const chosen = new Set(edition.items.map((i) => i.productId));
+  const products = listProducts(db, { activeOnly: true }).filter((p) => !chosen.has(p.id));
+  return c.html(ev.editionPage(c.get('staff')!, edition, products, editionForecast(db, id), flash(c)));
+});
+
+admin.post('/editions/:id', async (c) => {
+  const id = idParam(c);
+  const form = (await c.req.parseBody()) as Form;
+  return attempt(c, `/admin/editions/${id}`, 'Boxen sparad', () => {
+    updateEdition(c.get('db'), id, { name: str(form, 'name'), description: opt(form, 'description') });
+  });
+});
+
+admin.post('/editions/:id/items', async (c) => {
+  const id = idParam(c);
+  const form = (await c.req.parseBody()) as Form;
+  return attempt(c, `/admin/editions/${id}`, 'Innehållet uppdaterat', () => {
+    const productId = num(form, 'productId');
+    if (!productId) throw new AppError(422, 'MISSING_PRODUCT', 'Välj en produkt');
+    setEditionItem(c.get('db'), id, productId, num(form, 'quantity') ?? 0);
+  });
+});
+
+admin.post('/editions/:id/lock', (c) => {
+  const id = idParam(c);
+  return attempt(c, `/admin/editions/${id}`, 'Boxen är låst och kan plockas', () => void lockEdition(c.get('db'), id));
+});
+
+admin.post('/editions/:id/unlock', (c) => {
+  const id = idParam(c);
+  return attempt(c, `/admin/editions/${id}`, 'Boxen är upplåst för ändring', () => void unlockEdition(c.get('db'), id));
+});
+
+admin.post('/editions/:id/archive', (c) => {
+  const id = idParam(c);
+  return attempt(c, '/admin/editions', 'Boxen arkiverad', () => void archiveEdition(c.get('db'), id));
+});
+
+admin.get('/editions/:id/report', (c) => {
+  const db = c.get('db');
+  const id = idParam(c);
+  const supplierId = Number(c.req.query('supplierId')) || undefined;
+  const report = editionReport(db, id, { supplierId, includeComments: false });
+  return c.html(ev.editionReportPage(c.get('staff')!, report, listSuppliers(db), listComments(db, { editionId: id }), { supplierId, ...flash(c) }));
+});
+
+admin.get('/editions/:id/report.csv', (c) => {
+  const db = c.get('db');
+  const id = idParam(c);
+  const edition = getEdition(db, id);
+  const supplierId = Number(c.req.query('supplierId')) || undefined;
+  return c.body(editionReportCsv(db, id, { supplierId }), 200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="mysterysnus-${edition.period}.csv"`,
+  });
+});
+
+/* ---------- Återförsäljare och leverantörer ---------- */
+
+admin.get('/retailers', (c) => {
+  const db = c.get('db');
+  return c.html(
+    rv.retailersPage(c.get('staff')!, {
+      retailers: listRetailers(db), links: listAllLinks(db), products: listProducts(db, { activeOnly: true }),
+      publicBaseUrl: config.publicBaseUrl, ...flash(c),
+    }),
+  );
+});
+
+admin.post('/retailers', async (c) => {
+  const form = (await c.req.parseBody()) as Form;
+  return attempt(c, '/admin/retailers', 'Återförsäljaren tillagd', () => {
+    createRetailer(c.get('db'), { name: str(form, 'name'), website: opt(form, 'website') });
+  });
+});
+
+admin.post('/retailers/links', async (c) => {
+  const form = (await c.req.parseBody()) as Form;
+  return attempt(c, '/admin/retailers', 'Köplänken sparad', () => {
+    const retailerId = num(form, 'retailerId');
+    const productId = num(form, 'productId');
+    if (!retailerId || !productId) throw new AppError(422, 'MISSING_FIELDS', 'Välj både butik och produkt');
+    const priceKr = num(form, 'priceKr');
+    setRetailerLink(c.get('db'), { retailerId, productId, url: str(form, 'url'), priceOre: priceKr != null ? Math.round(priceKr * 100) : null });
+  });
+});
+
+admin.post('/retailers/links/:id/delete', (c) => {
+  const id = idParam(c);
+  return attempt(c, '/admin/retailers', 'Köplänken borttagen', () => deleteRetailerLink(c.get('db'), id));
+});
+
+admin.get('/suppliers', (c) => {
+  const db = c.get('db');
+  const products = listProducts(db);
+  const suppliers = listSuppliers(db).map((s) => ({ ...s, productCount: products.filter((p) => p.supplierId === s.id).length }));
+  return c.html(rv.suppliersPage(c.get('staff')!, { suppliers, ...flash(c) }));
+});
+
+admin.post('/suppliers', async (c) => {
+  const form = (await c.req.parseBody()) as Form;
+  return attempt(c, '/admin/suppliers', 'Leverantören tillagd', () => {
+    createSupplier(c.get('db'), { name: str(form, 'name'), contactName: opt(form, 'contactName'), contactEmail: opt(form, 'contactEmail') });
   });
 });

@@ -4,11 +4,17 @@ import { toCamel, toCamelAll } from '../db/rows.ts';
 import { config } from '../config.ts';
 import { AppError, invalid, notFound } from '../domain/errors.ts';
 import type { Strength } from '../domain/products.ts';
+import { dayOfMonthFor, firstRenewalFor, isWave, nextRenewalFor, waveCount, waveForJoinDate, waveLabel } from '../domain/waves.ts';
 import { assertOfAge, getCustomer } from './customers.ts';
 import { createOrder, findOrderByNumber, type OrderDetail } from './orders.ts';
+import { findEditionByPeriod } from './editions.ts';
 
 /**
- * Prenumerationer: kunden får en mystery-box (standard 4 dosor) en gång i månaden.
+ * Prenumerationer: kunden får månadens box (standard 4 dosor) en gång i månaden.
+ *
+ * Alla kunder får samma innehåll, men inte nödvändigtvis samma dag: varje
+ * prenumeration tillhör en utskicksvåg som styr vilken dag i månaden ordern skapas.
+ * Se src/domain/waves.ts.
  *
  * Förnyelse skapar en order för perioden (ÅÅÅÅ-MM). Ordern får externalRef
  * "SUB-<id>-<period>" och är därmed idempotent – anropas förnyelsen två gånger
@@ -37,6 +43,8 @@ export interface Subscription {
   intervalMonths: number;
   nextRenewalAt: string;
   lastRenewedAt: string | null;
+  /** Utskicksvåg 1–4. Styr vilken dag i månaden boxen skickas, aldrig innehållet. */
+  wave: number;
   externalRef: string | null;
   paymentMethod: string | null;
   notes: string | null;
@@ -61,8 +69,10 @@ export interface SubscriptionInput {
   /** Pris per period i öre. Utelämnas → boxpris enligt config. */
   priceOre?: number;
   intervalMonths?: number;
-  /** När första boxen ska skapas. Utelämnas → nu. */
+  /** När första boxen ska skapas. Utelämnas → nästa utskicksdag för kundens våg. */
   startAt?: string;
+  /** Utskicksvåg. Utelämnas → tilldelas efter när kunden gick med. */
+  wave?: number;
   /** Id hos betalleverantören (t.ex. Stripe subscription id). Unikt. */
   externalRef?: string | null;
   paymentMethod?: string | null;
@@ -100,16 +110,18 @@ export function createSubscription(db: Db, input: SubscriptionInput, actor = 'sy
       if (dup) throw new AppError(409, 'DUPLICATE_SUBSCRIPTION', `Prenumerationen finns redan (#${dup.id})`);
     }
     const ts = now();
-    const startAt = input.startAt ?? ts;
+    const wave = input.wave != null ? input.wave : waveForJoinDate(ts);
+    if (!isWave(wave)) throw invalid('INVALID_WAVE', 'Utskicksvåg måste vara 1–4');
+    const startAt = input.startAt ?? firstRenewalFor(wave, ts);
     const result = db
       .prepare(
         `INSERT INTO subscriptions (customer_id, status, box_size, quantity, strength, price_ore, interval_months, next_renewal_at,
-           external_ref, payment_method, notes, started_at, created_at, updated_at)
-         VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           wave, external_ref, payment_method, notes, started_at, created_at, updated_at)
+         VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         customer.id, boxSize, quantity, input.strength ?? null, Math.round(priceOre), input.intervalMonths ?? 1, startAt,
-        input.externalRef ?? null, input.paymentMethod ?? null, input.notes?.trim() || null, startAt, ts, ts,
+        wave, input.externalRef ?? null, input.paymentMethod ?? null, input.notes?.trim() || null, ts, ts, ts,
       );
     void actor;
     return getSubscription(db, Number(result.lastInsertRowid));
@@ -177,18 +189,19 @@ export function subscriptionCounts(db: Db): Record<SubscriptionStatus, number> &
 export function updateSubscription(
   db: Db,
   id: number,
-  patch: { boxSize?: number; quantity?: number; strength?: Strength | null; priceOre?: number; intervalMonths?: number; nextRenewalAt?: string; paymentMethod?: string | null; notes?: string | null; externalRef?: string | null },
+  patch: { boxSize?: number; quantity?: number; strength?: Strength | null; priceOre?: number; intervalMonths?: number; nextRenewalAt?: string; wave?: number; paymentMethod?: string | null; notes?: string | null; externalRef?: string | null },
 ): Subscription {
   const s = getSubscription(db, id);
+  if (patch.wave != null && !isWave(patch.wave)) throw invalid('INVALID_WAVE', 'Utskicksvåg måste vara 1–4');
   const boxSize = patch.boxSize ?? s.boxSize;
   const priceOre = patch.priceOre ?? (patch.boxSize != null && patch.boxSize !== s.boxSize ? config.mysteryBoxPricesOre[boxSize] : s.priceOre);
   if (priceOre == null) throw invalid('UNKNOWN_BOX_SIZE', `Inget pris finns för box med ${boxSize} dosor – ange priceOre`);
   db.prepare(
     `UPDATE subscriptions SET box_size = ?, quantity = ?, strength = ?, price_ore = ?, interval_months = ?, next_renewal_at = ?,
-       payment_method = ?, notes = ?, external_ref = ?, updated_at = ? WHERE id = ?`,
+       wave = ?, payment_method = ?, notes = ?, external_ref = ?, updated_at = ? WHERE id = ?`,
   ).run(
     boxSize, patch.quantity ?? s.quantity, patch.strength === undefined ? s.strength : patch.strength, Math.round(priceOre),
-    patch.intervalMonths ?? s.intervalMonths, patch.nextRenewalAt ?? s.nextRenewalAt,
+    patch.intervalMonths ?? s.intervalMonths, patch.nextRenewalAt ?? s.nextRenewalAt, patch.wave ?? s.wave,
     patch.paymentMethod === undefined ? s.paymentMethod : patch.paymentMethod, patch.notes === undefined ? s.notes : patch.notes?.trim() || null,
     patch.externalRef === undefined ? s.externalRef : patch.externalRef, now(), id,
   );
@@ -207,7 +220,7 @@ export function resumeSubscription(db: Db, id: number): Subscription {
   const s = getSubscription(db, id);
   if (s.status !== 'paused') throw new AppError(409, 'INVALID_TRANSITION', 'Bara pausade prenumerationer kan återupptas');
   const ts = now();
-  const next = s.nextRenewalAt < ts ? ts : s.nextRenewalAt;
+  const next = s.nextRenewalAt < ts ? firstRenewalFor(s.wave, ts) : s.nextRenewalAt;
   db.prepare("UPDATE subscriptions SET status = 'active', next_renewal_at = ?, last_error = NULL, updated_at = ? WHERE id = ?").run(next, ts, id);
   return getSubscription(db, id);
 }
@@ -254,10 +267,12 @@ export function renewSubscription(db: Db, id: number, opts: RenewOptions = {}, a
     }
 
     const customer = getCustomer(db, s.customerId);
+    const edition = findEditionByPeriod(db, period);
     const order = createOrder(db, {
       customerId: customer.id,
       lines: [{ kind: 'mystery_box', boxSize: s.boxSize, quantity: s.quantity, strength: s.strength, unitPriceOre: Math.round(s.priceOre / s.quantity) }],
       channel: 'subscription',
+      editionId: edition?.id ?? null,
       externalRef: ref,
       paymentMethod: s.paymentMethod,
       paymentStatus: opts.paymentStatus ?? 'unpaid',
@@ -268,7 +283,7 @@ export function renewSubscription(db: Db, id: number, opts: RenewOptions = {}, a
 
     const ts = now();
     const advance = opts.advance ?? true;
-    const nextRenewalAt = advance ? addMonths(s.nextRenewalAt, s.intervalMonths) : s.nextRenewalAt;
+    const nextRenewalAt = advance ? nextRenewalFor(s.wave, s.nextRenewalAt, s.intervalMonths) : s.nextRenewalAt;
     db.prepare('UPDATE subscriptions SET next_renewal_at = ?, last_renewed_at = ?, last_error = NULL, updated_at = ? WHERE id = ?').run(nextRenewalAt, ts, ts, id);
     return { order: findOrderByNumber(db, order.orderNumber)!, created: true, subscription: getSubscription(db, id) };
   });
@@ -294,4 +309,72 @@ export function renewDueSubscriptions(db: Db, at: string = now(), actor = 'sched
     }
   }
   return result;
+}
+
+export interface WaveSummary {
+  wave: number;
+  label: string;
+  dayOfMonth: number;
+  active: number;
+  paused: number;
+  nextRenewalAt: string | null;
+}
+
+/** Hur många prenumeranter som ligger i varje utskicksvåg. */
+export function waveSummary(db: Db): WaveSummary[] {
+  const rows = db
+    .prepare(
+      `SELECT wave,
+         SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+         SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END) AS paused,
+         MIN(CASE WHEN status = 'active' THEN next_renewal_at END) AS next_renewal_at
+       FROM subscriptions GROUP BY wave ORDER BY wave`,
+    )
+    .all() as { wave: number; active: number; paused: number; next_renewal_at: string | null }[];
+  const waves = waveCount();
+  const out: WaveSummary[] = [];
+  for (let w = 1; w <= waves; w++) {
+    const row = rows.find((r) => r.wave === w);
+    out.push({
+      wave: w,
+      label: waveLabel(w),
+      dayOfMonth: dayOfMonthFor(w),
+      active: row?.active ?? 0,
+      paused: row?.paused ?? 0,
+      nextRenewalAt: row?.next_renewal_at ?? null,
+    });
+  }
+  // Prenumeranter i vågar som inte längre används (t.ex. efter byte till "single").
+  for (const row of rows) {
+    if (row.wave > waves) {
+      out.push({ wave: row.wave, label: `Våg ${row.wave} (används inte)`, dayOfMonth: dayOfMonthFor(row.wave), active: row.active, paused: row.paused, nextRenewalAt: row.next_renewal_at });
+    }
+  }
+  return out;
+}
+
+/**
+ * Fördelar prenumeranter i vågor utifrån när de gick med och flyttar nästa
+ * förnyelse till vågens dag. Körs när man går från "alla samtidigt" till veckovis.
+ */
+export function assignWaves(db: Db): { updated: number } {
+  return transaction(db, () => {
+    const subs = db.prepare("SELECT id, started_at, wave, next_renewal_at, status FROM subscriptions WHERE status != 'cancelled'").all() as {
+      id: number;
+      started_at: string;
+      wave: number;
+      next_renewal_at: string;
+      status: string;
+    }[];
+    let updated = 0;
+    const ts = now();
+    for (const sub of subs) {
+      const wave = waveForJoinDate(sub.started_at);
+      const nextRenewalAt = sub.next_renewal_at < ts ? sub.next_renewal_at : firstRenewalFor(wave, ts);
+      if (wave === sub.wave && nextRenewalAt === sub.next_renewal_at) continue;
+      db.prepare('UPDATE subscriptions SET wave = ?, next_renewal_at = ?, updated_at = ? WHERE id = ?').run(wave, nextRenewalAt, ts, sub.id);
+      updated++;
+    }
+    return { updated };
+  });
 }

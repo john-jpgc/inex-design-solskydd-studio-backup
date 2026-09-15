@@ -6,6 +6,10 @@ import { productsApi } from './products.ts';
 import { ordersApi } from './orders.ts';
 import { shipmentsApi } from './shipments.ts';
 import { subscriptionsApi } from './subscriptions.ts';
+import { editionsApi } from './editions.ts';
+import { ratingsApi } from './ratings.ts';
+import { retailersApi } from './retailers.ts';
+import { suppliersApi } from './suppliers.ts';
 
 export const api = new Hono<AppEnv>()
   .get('/health', (c) => c.json({ ok: true, service: 'mysterysnus-oms' }))
@@ -14,4 +18,8 @@ export const api = new Hono<AppEnv>()
   .route('/products', productsApi)
   .route('/orders', ordersApi)
   .route('/shipments', shipmentsApi)
-  .route('/subscriptions', subscriptionsApi);
+  .route('/subscriptions', subscriptionsApi)
+  .route('/editions', editionsApi)
+  .route('/ratings', ratingsApi)
+  .route('/retailers', retailersApi)
+  .route('/suppliers', suppliersApi);

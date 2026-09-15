@@ -218,4 +218,127 @@ ALTER TABLE shipments ADD COLUMN label_data BLOB;
 ALTER TABLE shipments ADD COLUMN label_created_at TEXT;
 `,
   },
+  {
+    version: 3,
+    sql: `
+-- Leverantörer: får loggdata om hur deras snus tas emot.
+CREATE TABLE suppliers (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  contact_name TEXT,
+  contact_email TEXT,
+  notes TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+ALTER TABLE products ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id);
+
+-- Månadens box: samma innehåll till alla kunder.
+CREATE TABLE box_editions (
+  id INTEGER PRIMARY KEY,
+  period TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'locked', 'archived')),
+  locked_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE box_edition_items (
+  id INTEGER PRIMARY KEY,
+  edition_id INTEGER NOT NULL REFERENCES box_editions(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  quantity INTEGER NOT NULL CHECK (quantity > 0),
+  position INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (edition_id, product_id)
+);
+
+ALTER TABLE orders ADD COLUMN edition_id INTEGER REFERENCES box_editions(id);
+CREATE INDEX idx_orders_edition ON orders(edition_id);
+
+-- Utskicksvåg: 1 = alla samtidigt, annars grupp 1-4 efter när kunden gick med.
+ALTER TABLE subscriptions ADD COLUMN wave INTEGER NOT NULL DEFAULT 1;
+CREATE INDEX idx_subscriptions_wave ON subscriptions(wave, status);
+
+-- Publik, ogissbar identifierare som hemsidan använder i betygs- och återförsäljarlänkar.
+ALTER TABLE customers ADD COLUMN public_token TEXT;
+UPDATE customers SET public_token = lower(hex(randomblob(16)));
+CREATE UNIQUE INDEX idx_customers_public_token ON customers(public_token);
+
+-- Betyg per produkt i en viss månads box.
+CREATE TABLE product_ratings (
+  id INTEGER PRIMARY KEY,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  edition_id INTEGER NOT NULL REFERENCES box_editions(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  rating INTEGER CHECK (rating IS NULL OR rating BETWEEN 1 AND 5),
+  sentiment TEXT CHECK (sentiment IS NULL OR sentiment IN ('like', 'dislike', 'neutral')),
+  would_buy_again INTEGER,
+  comment TEXT,
+  source TEXT NOT NULL DEFAULT 'web',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (customer_id, edition_id, product_id)
+);
+CREATE INDEX idx_product_ratings_edition ON product_ratings(edition_id, product_id);
+CREATE INDEX idx_product_ratings_product ON product_ratings(product_id);
+CREATE INDEX idx_product_ratings_customer ON product_ratings(customer_id, edition_id);
+
+-- Helhetsbetyg på månadens box.
+CREATE TABLE edition_feedback (
+  id INTEGER PRIMARY KEY,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  edition_id INTEGER NOT NULL REFERENCES box_editions(id) ON DELETE CASCADE,
+  rating INTEGER CHECK (rating IS NULL OR rating BETWEEN 1 AND 5),
+  comment TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (customer_id, edition_id)
+);
+
+-- Återförsäljare dit kunden skickas för att köpa mer av en produkt.
+CREATE TABLE retailers (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  website TEXT,
+  notes TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE retailer_links (
+  id INTEGER PRIMARY KEY,
+  retailer_id INTEGER NOT NULL REFERENCES retailers(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  price_ore INTEGER,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (retailer_id, product_id)
+);
+CREATE INDEX idx_retailer_links_product ON retailer_links(product_id, active);
+
+CREATE TABLE retailer_clicks (
+  id INTEGER PRIMARY KEY,
+  link_id INTEGER NOT NULL REFERENCES retailer_links(id) ON DELETE CASCADE,
+  retailer_id INTEGER NOT NULL REFERENCES retailers(id),
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  customer_id INTEGER REFERENCES customers(id),
+  edition_id INTEGER REFERENCES box_editions(id),
+  source TEXT,
+  created_at TEXT NOT NULL,
+  converted_at TEXT,
+  conversion_value_ore INTEGER,
+  conversion_ref TEXT
+);
+CREATE INDEX idx_retailer_clicks_product ON retailer_clicks(product_id, created_at);
+CREATE INDEX idx_retailer_clicks_edition ON retailer_clicks(edition_id);
+CREATE INDEX idx_retailer_clicks_customer ON retailer_clicks(customer_id);
+CREATE UNIQUE INDEX idx_retailer_clicks_conversion_ref ON retailer_clicks(conversion_ref) WHERE conversion_ref IS NOT NULL;
+`,
+  },
 ];

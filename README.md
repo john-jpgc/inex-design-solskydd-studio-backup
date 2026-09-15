@@ -35,9 +35,10 @@ koll på kunder, lager och mystery-boxarnas innehåll, och följer varje försä
 src/
   config.ts          Inställningar (port, databas, frakt, boxpriser, moms …)
   db/                Schema/migrationer, anslutning, seed
-  domain/            Ren affärslogik: statusmaskin, boxplockare, pengar, transportörer
+  domain/            Ren affärslogik: statusmaskin, vågor, betyg, pengar, transportörer
   logistics/         Etikettleverantörer (gränssnitt + nShift/PostNord)
-  services/          Kunder, produkter, lager, ordrar, prenumerationer, försändelser, etiketter, auth
+  services/          Kunder, produkter, lager, månadsboxar, ordrar, prenumerationer,
+                     försändelser, etiketter, betyg, återförsäljare, rapporter, auth
   http/api/          JSON-API
   http/admin/        Admin-gränssnitt (server-renderad HTML)
   test/              Tester (node:test)
@@ -99,6 +100,23 @@ personal-session. Svar är JSON; fel har formen `{ "error": { "code", "message",
 | `POST` | `/api/v1/orders/:id/ship` | Skapa försändelse `{ carrier, service?, trackingNumber?, weightGrams?, pickupPoint? }` |
 | `POST` | `/api/v1/orders/:id/deliver` · `/cancel` · `/return` · `/refund` · `/reopen` · `/cancel-picking` | Övriga statusövergångar |
 | `PATCH` | `/api/v1/orders/:id` | Intern anteckning |
+| `GET/POST` | `/api/v1/editions` | Lista månadsboxar eller skapa en `{ period, name?, description? }` |
+| `GET` | `/api/v1/editions/period/:period` | Hämta boxen för en månad (ÅÅÅÅ-MM) |
+| `PUT` | `/api/v1/editions/:id/items` | Sätt innehållet `{ items: [{ productId, quantity }] }` |
+| `POST` | `/api/v1/editions/:id/lock` · `/unlock` · `/archive` | Lås innehållet inför plockning |
+| `GET` | `/api/v1/editions/:id/forecast` | Behov per produkt och vad som saknas i lager |
+| `GET` | `/api/v1/editions/:id/report` · `report.csv` | Loggdata till leverantör (`?supplierId=`) |
+| `GET` | `/api/v1/editions/:id/retail-links` | Köplänkar för allt i boxen (`?customerToken=`) |
+| `POST` | `/api/v1/ratings` | Betygsätt en produkt `{ customerToken\|customerId, period\|editionId, productId, rating?, sentiment?, wouldBuyAgain?, comment? }` |
+| `POST` | `/api/v1/ratings/box` | Helhetsbetyg på månadens box |
+| `GET` | `/api/v1/ratings` | Kundens betyg (`?customerToken=&period=`) |
+| `GET/POST` | `/api/v1/retailers` | Lista eller skapa återförsäljare |
+| `PUT` | `/api/v1/retailers/links` | Köplänk `{ retailerId, productId, url, priceOre? }` |
+| `POST` | `/api/v1/retailers/conversions` | Butiken rapporterar köp `{ ref, valueOre? }` |
+| `GET` | `/api/v1/retailers/stats` | Klick och köp per produkt och butik |
+| `GET/POST` | `/api/v1/suppliers` | Leverantörer |
+| `GET` | `/api/v1/products/:id/retailers` · `/history` | Köplänkar respektive mottagande över tid |
+| `GET` | `/r/:linkId?t=&p=` | **Publik** – loggar klicket och skickar kunden till butiken |
 | `GET/POST` | `/api/v1/subscriptions` | Lista (`?status=&customerId=`) eller skapa prenumeration `{ customerId, boxSize?, strength?, priceOre?, startAt?, externalRef? }` |
 | `GET/PATCH` | `/api/v1/subscriptions/:id` | Hämta (med ordrar) / ändra box, styrka, pris, nästa datum |
 | `POST` | `/api/v1/subscriptions/:id/renew` | Skapa periodens order `{ period?, paymentStatus?, paymentRef? }` – idempotent, tänkt för betalleverantörens webhook |
@@ -120,10 +138,10 @@ curl -X POST http://localhost:3000/api/v1/orders \
   -d '{
     "externalRef": "SHOP-1042",
     "customer": { "email": "anna@example.com", "firstName": "Anna", "lastName": "Andersson",
-                  "birthDate": "1988-03-12", "prefStrength": "strong", "prefFlavors": ["mint"] },
+                  "birthDate": "1988-03-12" },
     "shippingAddress": { "street": "Sveavägen 10", "postalCode": "111 57", "city": "Stockholm" },
     "lines": [
-      { "kind": "mystery_box", "boxSize": 10, "quantity": 1 },
+      { "kind": "mystery_box", "boxSize": 4, "quantity": 1 },
       { "kind": "product", "sku": "ZYN-COOL-MINT-S", "quantity": 2 }
     ],
     "paymentStatus": "paid", "paymentMethod": "klarna", "paymentRef": "KL-99812",
@@ -131,10 +149,49 @@ curl -X POST http://localhost:3000/api/v1/orders \
   }'
 ```
 
-Kunden skapas om e-posten är ny, annars uppdateras adress och preferenser. `externalRef` skyddar
-mot dubbletter. Produktrader reserverar lager direkt; boxinnehåll väljs vid plockning.
-Skickas inte `unitPriceOre` används produktens pris respektive boxpriset i `config.ts`.
+Kunden skapas om e-posten är ny, annars uppdateras adressen. `externalRef` skyddar mot dubbletter.
+Webbshopen behöver inte veta vad som ligger i boxen: utelämnas `editionId` binds periodens
+månadsbox automatiskt, och den bestämmer både antalet dosor och innehållet. Skicka `editionId: null`
+för en fristående box utanför prenumerationen. Produktrader reserverar lager direkt.
 Frakt beräknas enligt `config.shipping` om `shippingOre` utelämnas.
+
+### Månadsboxen
+
+1. Skapa boxen för nästa månad under **Månadsboxar**, lägg till fyra produkter och **lås** den.
+   En låst box kan inte ändras så länge ordrar plockas mot den.
+2. Prenumerationsordrarna för perioden fylls med exakt det innehållet. Behovsprognosen på
+   boxsidan visar hur många dosor som krävs för alla aktiva prenumeranter och vad som saknas.
+3. När boxarna skickats betygsätter kunderna innehållet från hemsidan. Rapporten per box
+   sammanställer betyg, kommentarer och merköp och kan delas med respektive leverantör.
+
+### Betyg och spårning från hemsidan
+
+Hemsidan identifierar kunden med `publicToken` (en ogissbar sträng på kundkortet) och behöver
+aldrig känna till interna id:n.
+
+```bash
+# Kundens betyg på en produkt i oktoberboxen
+curl -X POST http://localhost:3000/api/v1/ratings \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{ "customerToken": "a1b2…", "period": "2026-10", "productId": 12,
+        "rating": 5, "sentiment": "like", "wouldBuyAgain": true, "comment": "Bästa i boxen" }'
+
+# Köplänkar för allt i boxen, färdiga att visa som "köp mer"-knappar
+curl -H "X-API-Key: $API_KEY" \
+  "http://localhost:3000/api/v1/editions/7/retail-links?customerToken=a1b2…"
+```
+
+Varje köplänk pekar på `/r/:linkId?t=<kundtoken>&p=<period>`. Systemet loggar klicket med kund,
+produkt och månadsbox, lägger till en unik `ref` och skickar kunden vidare till butiken. När
+butiken rapporterar `POST /api/v1/retailers/conversions { ref, valueOre }` räknas köpet i
+rapporten. Klick från okända tokens loggas anonymt – länken fungerar alltid.
+
+### Utskicksvågor
+
+`SHIPPING_WAVE_MODE=single` (standard) skickar till alla samtidigt. `weekly` delar kunderna i
+fyra grupper efter vilken del av månaden de gick med: dag 1–7 ger våg 1 som förnyas den 1:a,
+dag 8–14 ger våg 2 som förnyas den 8:e, och så vidare. Byt läge i `.env` och kör sedan
+**Fördela prenumeranter i vågor** på prenumerationssidan för att placera befintliga kunder.
 
 ### Prenumerationsflödet
 
@@ -174,7 +231,12 @@ Systemet är byggt utan tillgång till sajten, så några saker är gissningar s
 
 - Boxen är 4 dosor och kostar **249 kr/månad – ett platshållarpris**. Ändra i `src/config.ts`
   (`mysteryBoxPricesOre`) eller sätt priset per prenumeration.
-- Styrkeskalan `mild / medium / strong / extra_strong` och att preferenser gäller styrka och smak.
+- Betygsskalan är 1–5 plus gillar/ogillar och "skulle köpa igen". Vilka fält ni faktiskt visar
+  på hemsidan avgör ni; alla är frivilliga i API:et.
+- Bara kunder som fått en box kan betygsätta den. Boxen räknas som mottagen när ordern är betald
+  och inte avbruten.
+- Kundens styrke- och smakpreferenser finns kvar på kundkortet för segmentering, men styr inte
+  längre innehållet i boxen eftersom alla får samma.
 - Endast leverans inom Sverige och 25 % moms på allt.
 - Betalning sker i webbshopen (Klarna/Swish/kort); systemet registrerar bara betalstatus och
   återbetalningsbehov, det utför inga betalningar.

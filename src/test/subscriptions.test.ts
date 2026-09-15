@@ -29,7 +29,7 @@ test('prenumeration skapar en 4-box per månad, idempotent per period', () => {
   assert.equal(first.order.externalRef, `SUB-${sub.id}-2026-09`);
   assert.equal(first.order.lines[0]?.boxSize, 4);
   assert.equal(first.order.totalOre, config.mysteryBoxPricesOre[4]! + config.shipping.standardOre);
-  assert.equal(first.subscription.nextRenewalAt, '2026-10-01T08:00:00.000Z');
+  assert.equal(first.subscription.nextRenewalAt, '2026-10-01T06:00:00.000Z', 'nästa förnyelse läggs på vågens dag');
 
   const again = renewSubscription(db, sub.id, { period: '2026-09' });
   assert.equal(again.created, false);

@@ -41,6 +41,7 @@ export const productSchema = z.object({
   vatRate: z.number().int().min(0).max(100).optional(),
   weightGrams: z.number().int().min(1).max(5000).optional(),
   active: z.boolean().optional(),
+  supplierId: z.number().int().positive().nullish(),
 });
 
 export const productPatchSchema = productSchema.partial();
@@ -86,6 +87,8 @@ export const createOrderSchema = z.object({
   paymentRef: optionalText(200),
   shippingOre: ore.optional(),
   channel: z.string().trim().max(50).optional(),
+  /** Utelämnas → periodens månadsbox binds automatiskt. null → fristående box utan utgåva. */
+  editionId: z.number().int().positive().nullish(),
   externalRef: optionalText(200),
   customerNote: optionalText(2000),
   ageVerified: z.boolean().optional(),

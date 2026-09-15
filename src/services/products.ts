@@ -18,6 +18,8 @@ export interface Product {
   vatRate: number;
   weightGrams: number;
   active: boolean;
+  /** Leverantör som får loggdata om hur produkten tas emot. */
+  supplierId: number | null;
   stockOnHand: number;
   stockReserved: number;
   createdAt: string;
@@ -36,6 +38,7 @@ export interface ProductInput {
   vatRate?: number;
   weightGrams?: number;
   active?: boolean;
+  supplierId?: number | null;
 }
 
 const MAP_OPTS = { bool: ['active'] };
@@ -56,13 +59,13 @@ export function createProduct(db: Db, input: ProductInput): Product {
   const ts = now();
   const result = db
     .prepare(
-      `INSERT INTO products (sku, name, brand, flavor, strength, nicotine_mg, format, price_ore, vat_rate, weight_grams, active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO products (sku, name, brand, flavor, strength, nicotine_mg, format, price_ore, vat_rate, weight_grams, active, supplier_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       sku, input.name.trim(), input.brand.trim(), input.flavor.trim(), input.strength, input.nicotineMg ?? null,
       input.format ?? 'slim', Math.round(input.priceOre), input.vatRate ?? config.vatRate, input.weightGrams ?? 20,
-      input.active === false ? 0 : 1, ts, ts,
+      input.active === false ? 0 : 1, input.supplierId ?? null, ts, ts,
     );
   return getProduct(db, Number(result.lastInsertRowid));
 }
@@ -79,6 +82,7 @@ const PATCH_COLUMNS: Record<string, string> = {
   vatRate: 'vat_rate',
   weightGrams: 'weight_grams',
   active: 'active',
+  supplierId: 'supplier_id',
 };
 
 export function updateProduct(db: Db, id: number, patch: Partial<ProductInput>): Product {
@@ -88,7 +92,9 @@ export function updateProduct(db: Db, id: number, patch: Partial<ProductInput>):
   for (const [key, column] of Object.entries(PATCH_COLUMNS)) {
     const value = (patch as Record<string, unknown>)[key];
     if (value === undefined) continue;
-    if (key === 'sku') {
+    if (key === 'supplierId') {
+      params.push(value === null ? null : Number(value));
+    } else if (key === 'sku') {
       const sku = String(value).trim().toUpperCase();
       const other = findProductBySku(db, sku);
       if (other && other.id !== id) throw conflict('SKU_TAKEN', `SKU ${sku} finns redan`);
@@ -119,11 +125,15 @@ export function findProductBySku(db: Db, sku: string): Product | undefined {
 
 export function listProducts(
   db: Db,
-  opts: { q?: string; activeOnly?: boolean; inStockOnly?: boolean; lowStockOnly?: boolean } = {},
+  opts: { q?: string; activeOnly?: boolean; inStockOnly?: boolean; lowStockOnly?: boolean; supplierId?: number } = {},
 ): Product[] {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (opts.activeOnly) where.push('active = 1');
+  if (opts.supplierId != null) {
+    where.push('supplier_id = ?');
+    params.push(opts.supplierId);
+  }
   if (opts.inStockOnly) where.push('stock_on_hand - stock_reserved > 0');
   if (opts.lowStockOnly) {
     where.push('stock_on_hand - stock_reserved <= ?');

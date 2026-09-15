@@ -12,6 +12,13 @@ import { availableStock, isLowStock, type Product } from '../../services/product
 import type { StockMovement } from '../../services/inventory.ts';
 import { PAYMENT_STATUS_LABELS, type OrderDetail, type OrderListItem } from '../../services/orders.ts';
 import type { ShipmentDetail, ShipmentListItem } from '../../services/shipments.ts';
+import type { EditionListItem } from '../../services/editions.ts';
+import { periodLabel } from '../../services/editions.ts';
+import { SENTIMENT_LABELS } from '../../domain/ratings.ts';
+import type { CustomerRatingHistoryRow } from '../../services/ratings.ts';
+import type { Supplier } from '../../services/suppliers.ts';
+import type { WaveSummary } from '../../services/subscriptions.ts';
+import type { ProductHistoryRow } from '../../services/reports.ts';
 import { SUBSCRIPTION_STATUS_LABELS, type Subscription, type SubscriptionListItem, type SubscriptionStatus } from '../../services/subscriptions.ts';
 import { config } from '../../config.ts';
 
@@ -20,9 +27,11 @@ type Html = HtmlEscapedString | Promise<HtmlEscapedString>;
 const CSS = `
 :root{--bg:#f6f5f2;--card:#fff;--ink:#1d1d1b;--muted:#6b6b66;--line:#e4e2dc;--accent:#0f6b4f;--accent-ink:#fff;--warn:#b45309;--danger:#b91c1c;--info:#1d4ed8}
 *{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);font-size:15px;line-height:1.45}
-a{color:var(--accent)}header{background:#14342b;color:#fff;padding:0 24px;display:flex;align-items:center;gap:24px;height:56px}
-header .brand{font-weight:700;letter-spacing:.3px;color:#fff;text-decoration:none;font-size:17px}header nav a{color:#cfe3da;text-decoration:none;margin-right:16px}header nav a.active,header nav a:hover{color:#fff}
-header .user{margin-left:auto;color:#cfe3da;font-size:13px;display:flex;gap:12px;align-items:center}header .user button{background:transparent;border:1px solid #4f7d6d;color:#fff;padding:4px 10px;border-radius:6px;cursor:pointer}
+a{color:var(--accent)}header{background:#14342b;color:#fff;padding:8px 20px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;min-height:56px}
+header .brand{font-weight:700;letter-spacing:.3px;color:#fff;text-decoration:none;font-size:16px;white-space:nowrap}
+header nav{display:flex;flex-wrap:wrap;gap:4px 14px}header nav a{color:#cfe3da;text-decoration:none;font-size:14px;white-space:nowrap}header nav a.active,header nav a:hover{color:#fff}
+header .user{margin-left:auto;color:#cfe3da;font-size:13px;display:flex;gap:12px;align-items:center;white-space:nowrap}header .user button{background:transparent;border:1px solid #4f7d6d;color:#fff;padding:4px 10px;border-radius:6px;cursor:pointer}
+@media (max-width:900px){header .user{margin-left:0;width:100%}}
 main{max-width:1200px;margin:0 auto;padding:24px}h1{font-size:24px;margin:0 0 16px}h2{font-size:17px;margin:24px 0 8px}h3{font-size:15px;margin:16px 0 6px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:16px}.grid{display:grid;gap:16px}.grid.cols-2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}.grid.cols-4{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
 .stat{display:block;text-decoration:none;color:inherit}.stat .n{font-size:28px;font-weight:700}.stat .l{color:var(--muted);font-size:13px}
@@ -58,11 +67,13 @@ export function shipmentBadge(status: ShipmentStatus): Html {
 
 const NAV: [string, string][] = [
   ['/admin', 'Översikt'],
+  ['/admin/editions', 'Månadsboxar'],
   ['/admin/orders', 'Ordrar'],
   ['/admin/subscriptions', 'Prenumerationer'],
   ['/admin/shipments', 'Försändelser'],
   ['/admin/products', 'Produkter & lager'],
   ['/admin/customers', 'Kunder'],
+  ['/admin/retailers', 'Återförsäljare'],
 ];
 
 export function layout(
@@ -115,7 +126,7 @@ ${opts.error ? html`<div class="flash err">${opts.error}</div>` : ''}
 
 export function dashboardPage(
   staff: StaffUser,
-  data: { counts: Record<OrderStatus, number>; queue: OrderListItem[]; lowStock: Product[]; refundDue: OrderListItem[]; unpaid: OrderListItem[]; subs: { active: number; paused: number; dueWithin7Days: number }; labelProvider: { id: string; name: string; configured: boolean } },
+  data: { counts: Record<OrderStatus, number>; queue: OrderListItem[]; lowStock: Product[]; refundDue: OrderListItem[]; unpaid: OrderListItem[]; subs: { active: number; paused: number; dueWithin7Days: number }; labelProvider: { id: string; name: string; configured: boolean }; currentEdition?: EditionListItem; waves: WaveSummary[] },
 ): Html {
   const c = data.counts;
   const stat = (n: number, label: string, href: string) => html`<a class="card stat" href="${href}"><div class="n">${n}</div><div class="l">${label}</div></a>`;
@@ -135,6 +146,21 @@ export function dashboardPage(
   ${stat(data.subs.paused, 'Pausade prenumerationer', '/admin/subscriptions?status=paused')}
 </div>
 ${data.labelProvider.id !== 'manual' && !data.labelProvider.configured ? html`<div class="flash err">Etikettleverantören ${data.labelProvider.name} är vald men saknar nycklar – se .env.example.</div>` : ''}
+<div class="grid cols-2">
+<div class="card"><h2 style="margin-top:0">Den här månadens box</h2>
+${data.currentEdition
+  ? html`<p><a href="/admin/editions/${data.currentEdition.id}"><strong>${data.currentEdition.name}</strong></a> · ${data.currentEdition.totalCans} dosor · ${data.currentEdition.status === 'locked' ? html`<span class="badge delivered">Låst</span>` : html`<span class="badge pending">Utkast</span>`}</p>
+     ${data.currentEdition.status === 'draft' ? html`<p class="small" style="color:var(--warn)">Boxen måste låsas innan plockningen kan starta.</p>` : ''}
+     <p class="small muted">${data.currentEdition.orderCount} ordrar · ${data.currentEdition.ratingCount} betyg</p>`
+  : html`<p style="color:var(--warn)">Ingen box är skapad för den här månaden. <a href="/admin/editions">Skapa den</a> innan prenumerationsordrarna ska plockas.</p>`}
+</div>
+<div class="card"><h2 style="margin-top:0">Utskicksvågor</h2>
+<table><tr><th>Grupp</th><th class="num">Aktiva</th><th class="num">Pausade</th><th>Nästa utskick</th></tr>
+${data.waves.map((w) => html`<tr><td>${w.label}</td><td class="num">${w.active}</td><td class="num">${w.paused}</td><td class="small">${fmtDate(w.nextRenewalAt)}</td></tr>`)}
+</table>
+<p class="small muted"><a href="/admin/subscriptions">Hantera prenumerationer och vågor</a></p>
+</div>
+</div>
 <div class="grid cols-2">
 <div class="card"><h2 style="margin-top:0">Plockkö</h2>${orderTable(data.queue, { compact: true })}</div>
 <div class="card"><h2 style="margin-top:0">Lågt lager (≤ ${config.lowStockThreshold} st)</h2>
@@ -305,12 +331,12 @@ export function newOrderPage(staff: StaffUser, customers: Customer[], products: 
   <div class="field"><label>Betalning</label><select name="paymentStatus"><option value="unpaid">Obetald (faktura/väntar)</option><option value="paid">Redan betald</option></select></div>
   <div class="field"><label>Betalsätt</label><input name="paymentMethod" placeholder="swish / kort / faktura"></div>
 </div>
-<h3>Mystery box</h3>
+<h3>Månadens box</h3>
 <div class="row">
-  <div class="field"><label>Storlek</label><select name="boxSize"><option value="">Ingen box</option>${Object.entries(config.mysteryBoxPricesOre).map(([size, price]) => html`<option value="${size}">${size} dosor – ${formatSek(price)}</option>`)}</select></div>
+  <div class="field"><label>Box</label><select name="boxSize"><option value="">Ingen box</option>${Object.entries(config.mysteryBoxPricesOre).map(([size, price]) => html`<option value="${size}">Månadens box (${size} dosor) – ${formatSek(price)}</option>`)}</select></div>
   <div class="field"><label>Antal boxar</label><input type="number" name="boxQuantity" value="1" min="1"></div>
-  <div class="field"><label>Styrka (valfritt)</label><select name="boxStrength"><option value="">Enligt kundens preferens</option>${STRENGTHS.map((s) => html`<option value="${s}">${STRENGTH_LABELS[s]}</option>`)}</select></div>
 </div>
+<p class="small muted">Innehållet hämtas från den här månadens box och är detsamma som alla andra kunder får.</p>
 <h3>Enskilda produkter</h3>
 <p class="small muted">En rad per produkt: <span class="mono">SKU antal</span>, t.ex. <span class="mono">ZYN-COOL-MINT-S 3</span>. Tillgängliga: ${products.map((p) => p.sku).join(', ')}</p>
 <div class="field"><textarea name="productLines" placeholder="VELO-ICE-COOL-S 2"></textarea></div>
@@ -356,7 +382,14 @@ export function newCustomerPage(staff: StaffUser, opts: { err?: string; values?:
   return layout(staff, 'Ny kund', html`<h1>Ny kund</h1><div class="card">${customerForm(opts.values ?? {}, '/admin/customers/new', 'Skapa kund')}</div>`, { path: '/admin/customers', err: opts.err });
 }
 
-export function customerPage(staff: StaffUser, customer: Customer, orders: OrderListItem[], subscriptions: Subscription[], opts: { msg?: string; err?: string } = {}): Html {
+export function customerPage(
+  staff: StaffUser,
+  customer: Customer,
+  orders: OrderListItem[],
+  subscriptions: Subscription[],
+  ratings: CustomerRatingHistoryRow[],
+  opts: { msg?: string; err?: string } = {},
+): Html {
   return layout(staff, fullName(customer), html`
 <h1>${fullName(customer)} ${customer.status === 'blocked' ? html`<span class="badge cancelled">Spärrad</span>` : ''}</h1>
 <div class="grid cols-2">
@@ -378,22 +411,38 @@ ${subscriptions.map((s) => html`<tr><td><a href="/admin/subscriptions/${s.id}">#
 </div>
 <div class="card"><h2 style="margin-top:0">Ordrar</h2>${orderTable(orders, { compact: true })}<p class="small muted">Kund sedan ${fmtDate(customer.createdAt)}</p></div>
 </div>
+</div>
+<div class="card">
+<h2 style="margin-top:0">Betyg och omdömen (${ratings.length})</h2>
+${ratings.length === 0 ? html`<p class="muted">Kunden har inte betygsatt något ännu.</p>` : html`<table>
+<tr><th>Box</th><th>Produkt</th><th>Betyg</th><th>Omdöme</th><th>Köper igen</th><th>Kommentar</th></tr>
+${ratings.map((r) => html`<tr>
+<td class="small"><a href="/admin/editions/${r.editionId}">${r.period}</a></td>
+<td><span class="mono">${r.sku}</span> <span class="small">${r.brand} ${r.productName}</span></td>
+<td>${r.rating == null ? '–' : `${r.rating}/5`}</td>
+<td class="small">${r.sentiment ? SENTIMENT_LABELS[r.sentiment] : '–'}</td>
+<td class="small">${r.wouldBuyAgain == null ? '–' : r.wouldBuyAgain ? 'Ja' : 'Nej'}</td>
+<td class="small">${r.comment ?? ''}</td>
+</tr>`)}
+</table>`}
+<p class="small muted">Kundens publika token för betygs- och köplänkar: <span class="mono">${customer.publicToken}</span></p>
 </div>`, { path: '/admin/customers', ...opts });
 }
 
 /* ---------- Produkter ---------- */
 
-export function productsPage(staff: StaffUser, data: { products: Product[]; q?: string; lowStock?: boolean; msg?: string; err?: string }): Html {
+export function productsPage(staff: StaffUser, data: { products: Product[]; supplierNames: Map<number, string>; q?: string; lowStock?: boolean; msg?: string; err?: string }): Html {
   return layout(staff, 'Produkter & lager', html`
 <h1>Produkter & lager</h1>
-<div class="filters"><a href="/admin/products" class="${!data.lowStock ? 'active' : ''}">Alla</a><a href="/admin/products?lowStock=1" class="${data.lowStock ? 'active' : ''}">Lågt lager</a><a class="btn" href="/admin/products/new">+ Ny produkt</a>
+<div class="filters"><a href="/admin/products" class="${!data.lowStock ? 'active' : ''}">Alla</a><a href="/admin/products?lowStock=1" class="${data.lowStock ? 'active' : ''}">Lågt lager</a><a class="btn" href="/admin/products/new">+ Ny produkt</a><a href="/admin/suppliers">Leverantörer</a>
 <form method="get" action="/admin/products"><input type="search" name="q" placeholder="Sök SKU, namn, märke, smak…" value="${data.q ?? ''}"><button type="submit" class="secondary">Sök</button></form></div>
 <div class="card"><table>
-<tr><th>SKU</th><th>Produkt</th><th>Smak</th><th>Styrka</th><th class="num">Pris</th><th class="num">Saldo</th><th class="num">Reserverat</th><th class="num">Tillgängligt</th><th>Snabbjustering</th></tr>
+<tr><th>SKU</th><th>Produkt</th><th>Smak</th><th>Styrka</th><th>Leverantör</th><th class="num">Pris</th><th class="num">Saldo</th><th class="num">Reserverat</th><th class="num">Tillgängligt</th><th>Snabbjustering</th></tr>
 ${data.products.map((p) => html`<tr>
 <td class="mono"><a href="/admin/products/${p.id}">${p.sku}</a></td>
 <td>${p.brand} ${p.name}${p.active ? '' : html` <span class="badge cancelled">Inaktiv</span>`}</td>
 <td>${p.flavor}</td><td class="small">${STRENGTH_LABELS[p.strength]}${p.nicotineMg != null ? html` <span class="muted">${p.nicotineMg} mg</span>` : ''}</td>
+<td class="small">${data.supplierNames.get(p.supplierId ?? -1) ?? html`<span class="muted">–</span>`}</td>
 <td class="num">${formatSek(p.priceOre)}</td><td class="num">${p.stockOnHand}</td><td class="num">${p.stockReserved}</td>
 <td class="num">${availableStock(p)} ${isLowStock(p) ? html`<span class="badge low">Lågt</span>` : ''}</td>
 <td><form method="post" action="/admin/products/${p.id}/stock" class="row" style="gap:4px"><input type="number" name="delta" placeholder="±" style="width:70px" required><select name="reason" style="width:120px"><option value="purchase">Inleverans</option><option value="adjustment">Inventering</option><option value="return">Retur</option><option value="correction">Rättelse</option></select><button type="submit" class="secondary">OK</button></form></td>
@@ -401,7 +450,7 @@ ${data.products.map((p) => html`<tr>
 </table></div>`, { path: '/admin/products', msg: data.msg, err: data.err });
 }
 
-function productForm(p: Partial<Product>, action: string, submitLabel: string): Html {
+function productForm(p: Partial<Product>, action: string, submitLabel: string, suppliers: Supplier[] = []): Html {
   const v = (s: string | number | null | undefined) => (s == null ? '' : String(s));
   return html`<form method="post" action="${action}">
 <div class="row"><div class="field"><label>SKU</label><input name="sku" value="${v(p.sku)}" required></div><div class="field"><label>Märke</label><input name="brand" value="${v(p.brand)}" required></div><div class="field" style="flex:2"><label>Namn</label><input name="name" value="${v(p.name)}" required></div></div>
@@ -412,20 +461,28 @@ function productForm(p: Partial<Product>, action: string, submitLabel: string): 
 <div class="row"><div class="field"><label>Pris (kr inkl. moms)</label><input type="number" step="0.01" name="priceKr" value="${p.priceOre != null ? (p.priceOre / 100).toFixed(2) : ''}" required></div>
 <div class="field"><label>Moms %</label><input type="number" name="vatRate" value="${p.vatRate ?? config.vatRate}"></div>
 <div class="field"><label>Vikt (g/dosa)</label><input type="number" name="weightGrams" value="${p.weightGrams ?? 20}"></div>
+<div class="field"><label>Leverantör</label><select name="supplierId"><option value="">–</option>${suppliers.map((s) => html`<option value="${s.id}" ${p.supplierId === s.id ? 'selected' : ''}>${s.name}</option>`)}</select></div>
 <div class="field"><label><input type="checkbox" name="active" value="1" style="width:auto" ${p.active !== false ? 'checked' : ''}> Aktiv (kan säljas och plockas)</label></div></div>
 <div class="actions"><button type="submit">${submitLabel}</button></div></form>`;
 }
 
-export function newProductPage(staff: StaffUser, opts: { err?: string } = {}): Html {
-  return layout(staff, 'Ny produkt', html`<h1>Ny produkt</h1><div class="card">${productForm({}, '/admin/products/new', 'Skapa produkt')}</div>`, { path: '/admin/products', err: opts.err });
+export function newProductPage(staff: StaffUser, suppliers: Supplier[], opts: { err?: string } = {}): Html {
+  return layout(staff, 'Ny produkt', html`<h1>Ny produkt</h1><div class="card">${productForm({}, '/admin/products/new', 'Skapa produkt', suppliers)}</div>`, { path: '/admin/products', err: opts.err });
 }
 
-export function productPage(staff: StaffUser, product: Product, movements: StockMovement[], opts: { msg?: string; err?: string } = {}): Html {
+export function productPage(
+  staff: StaffUser,
+  product: Product,
+  movements: StockMovement[],
+  suppliers: Supplier[],
+  history: ProductHistoryRow[],
+  opts: { msg?: string; err?: string } = {},
+): Html {
   const reasons: Record<string, string> = { purchase: 'Inleverans', adjustment: 'Inventering', pick: 'Plock', return: 'Retur', correction: 'Rättelse' };
   return layout(staff, product.sku, html`
 <h1>${product.brand} ${product.name} <span class="mono muted">${product.sku}</span></h1>
 <div class="grid cols-2">
-<div class="card"><h2 style="margin-top:0">Produkt</h2>${productForm(product, `/admin/products/${product.id}`, 'Spara')}</div>
+<div class="card"><h2 style="margin-top:0">Produkt</h2>${productForm(product, `/admin/products/${product.id}`, 'Spara', suppliers)}<p class="small muted"><a href="/admin/suppliers">Hantera leverantörer</a></p></div>
 <div>
 <div class="card"><h2 style="margin-top:0">Lager</h2>
 <dl><dt>Saldo</dt><dd>${product.stockOnHand}</dd><dt>Reserverat</dt><dd>${product.stockReserved}</dd><dt>Tillgängligt</dt><dd><strong>${availableStock(product)}</strong> ${isLowStock(product) ? html`<span class="badge low">Lågt</span>` : ''}</dd></dl>
@@ -434,6 +491,10 @@ export function productPage(staff: StaffUser, product: Product, movements: Stock
 <div class="field"><label>Orsak</label><select name="reason"><option value="purchase">Inleverans</option><option value="adjustment">Inventering</option><option value="return">Retur</option><option value="correction">Rättelse</option></select></div>
 <div class="field" style="flex:2"><label>Notering</label><input name="note"></div>
 <div class="field" style="flex:0"><button type="submit">Registrera</button></div></form></div>
+<div class="card"><h2 style="margin-top:0">Mottagande i boxarna</h2>
+${history.length === 0 ? html`<p class="muted">Produkten har inte ingått i någon box ännu.</p>` : html`<table><tr><th>Box</th><th class="num">Svar</th><th>Snittbetyg</th><th class="num">Gillar</th><th class="num">Ogillar</th><th class="num">Klick</th></tr>
+${history.map((h) => html`<tr><td><a href="/admin/editions/${h.editionId}">${periodLabel(h.period)}</a></td><td class="num">${h.responses}</td><td>${h.averageRating == null ? '–' : `${h.averageRating}/5`}</td><td class="num">${h.likes}</td><td class="num">${h.dislikes}</td><td class="num">${h.clicks}</td></tr>`)}
+</table>`}</div>
 <div class="card"><h2 style="margin-top:0">Lagerhistorik</h2>
 ${movements.length === 0 ? html`<p class="muted">Inga rörelser.</p>` : html`<table><tr><th>När</th><th>Orsak</th><th class="num">Ändring</th><th>Referens</th></tr>
 ${movements.map((m) => html`<tr><td class="small">${fmtDate(m.createdAt)}</td><td>${reasons[m.reason] ?? m.reason}</td><td class="num">${m.delta > 0 ? `+${m.delta}` : m.delta}</td><td class="small mono">${m.reference ?? ''} <span class="muted">${m.note ?? ''}</span></td></tr>`)}</table>`}
@@ -472,7 +533,7 @@ export function subscriptionBadge(status: SubscriptionStatus): Html {
   return html`<span class="badge ${status}">${SUBSCRIPTION_STATUS_LABELS[status]}</span>`;
 }
 
-export function subscriptionsPage(staff: StaffUser, data: { subscriptions: SubscriptionListItem[]; status?: string; q?: string; msg?: string; err?: string }): Html {
+export function subscriptionsPage(staff: StaffUser, data: { subscriptions: SubscriptionListItem[]; waves: WaveSummary[]; waveMode: string; status?: string; q?: string; msg?: string; err?: string }): Html {
   const filter = (value: string | undefined, label: string) =>
     html`<a href="/admin/subscriptions${value ? `?status=${value}` : ''}" class="${(data.status ?? '') === (value ?? '') ? 'active' : ''}">${label}</a>`;
   const nowIso = new Date().toISOString();
@@ -483,15 +544,25 @@ export function subscriptionsPage(staff: StaffUser, data: { subscriptions: Subsc
 <form method="get" action="/admin/subscriptions"><input type="search" name="q" placeholder="Sök namn, e-post, referens…" value="${data.q ?? ''}"><button type="submit" class="secondary">Sök</button></form></div>
 <div class="card">
 ${data.subscriptions.length === 0 ? html`<p class="muted">Inga prenumerationer.</p>` : html`<table>
-<tr><th>#</th><th>Kund</th><th>Box</th><th>Status</th><th>Nästa box</th><th>Senast</th><th class="num">Pris/mån</th><th class="num">Ordrar</th></tr>
+<tr><th>#</th><th>Kund</th><th>Box</th><th>Grupp</th><th>Status</th><th>Nästa box</th><th>Senast</th><th class="num">Pris/mån</th><th class="num">Ordrar</th></tr>
 ${data.subscriptions.map((s) => html`<tr>
 <td><a href="/admin/subscriptions/${s.id}">#${s.id}</a>${s.externalRef ? html`<div class="small muted mono">${s.externalRef}</div>` : ''}</td>
 <td><a href="/admin/customers/${s.customerId}">${s.customerName}</a><div class="small muted">${s.customerEmail}</div></td>
-<td>${s.boxSize} dosor × ${s.quantity}${s.strength ? html`<div class="small muted">${STRENGTH_LABELS[s.strength]}</div>` : ''}</td>
+<td>${s.boxSize} dosor × ${s.quantity}</td>
+<td class="small">${data.waveMode === 'single' ? html`<span class="muted">Alla samtidigt</span>` : `Våg ${s.wave}`}</td>
 <td>${subscriptionBadge(s.status)}${s.lastError ? html`<div class="small" style="color:var(--danger)">${s.lastError}</div>` : ''}</td>
 <td class="small">${fmtDate(s.nextRenewalAt)}${s.status === 'active' && s.nextRenewalAt <= nowIso ? html` <span class="badge pending">Förfallen</span>` : ''}</td>
 <td class="small">${fmtDate(s.lastRenewedAt)}</td><td class="num">${formatSek(s.priceOre)}</td><td class="num">${s.orderCount}</td>
 </tr>`)}</table>`}
+</div>
+<div class="card">
+<h2 style="margin-top:0">Utskicksvågor</h2>
+<p class="small muted">Alla kunder får samma box. Vågen styr bara vilken dag den skickas. Läget sätts med <span class="mono">SHIPPING_WAVE_MODE</span> i .env (<span class="mono">single</span> = alla samtidigt, <span class="mono">weekly</span> = fyra grupper).
+Nuvarande läge: <strong>${data.waveMode === 'weekly' ? 'veckovis i fyra grupper' : 'alla samtidigt'}</strong>.</p>
+<table><tr><th>Grupp</th><th>Dag i månaden</th><th class="num">Aktiva</th><th class="num">Pausade</th><th>Nästa utskick</th></tr>
+${data.waves.map((w) => html`<tr><td>${w.label}</td><td>${w.dayOfMonth}</td><td class="num">${w.active}</td><td class="num">${w.paused}</td><td class="small">${fmtDate(w.nextRenewalAt)}</td></tr>`)}
+</table>
+<form method="post" action="/admin/waves/assign" class="actions" onsubmit="return confirm('Fördela om alla prenumeranter efter när de gick med?')"><button type="submit" class="secondary">Fördela prenumeranter i vågor efter startdatum</button></form>
 </div>
 <p class="small muted">Månadsordrar skapas automatiskt av servern när förnyelsedatumet passerat, eller via <span class="mono">POST /api/v1/subscriptions/:id/renew</span> från betalleverantörens webhook.</p>
 `, { path: '/admin/subscriptions', msg: data.msg, err: data.err });
@@ -512,12 +583,13 @@ ${sub.status !== 'cancelled' ? html`<form class="inline" method="post" action="/
 <div class="card"><h2 style="margin-top:0">Inställningar</h2>
 <form method="post" action="/admin/subscriptions/${sub.id}">
 <div class="row"><div class="field"><label>Dosor/box</label><input type="number" name="boxSize" value="${sub.boxSize}" min="1"></div><div class="field"><label>Antal boxar</label><input type="number" name="quantity" value="${sub.quantity}" min="1"></div>
-<div class="field"><label>Styrka</label><select name="strength"><option value="">Kundens preferens</option>${STRENGTHS.map((st) => html`<option value="${st}" ${sub.strength === st ? 'selected' : ''}>${STRENGTH_LABELS[st]}</option>`)}</select></div></div>
+<div class="field"><label>Utskicksgrupp</label><select name="wave">${[1, 2, 3, 4].map((w) => html`<option value="${w}" ${sub.wave === w ? 'selected' : ''}>Våg ${w}</option>`)}</select></div></div>
 <div class="row"><div class="field"><label>Pris/period (kr)</label><input type="number" step="0.01" name="priceKr" value="${(sub.priceOre / 100).toFixed(2)}"></div><div class="field"><label>Intervall (mån)</label><input type="number" name="intervalMonths" value="${sub.intervalMonths}" min="1" max="12"></div>
 <div class="field"><label>Nästa box</label><input type="date" name="nextRenewalDate" value="${sub.nextRenewalAt.slice(0, 10)}"></div></div>
 <div class="row"><div class="field"><label>Betalsätt</label><input name="paymentMethod" value="${sub.paymentMethod ?? ''}"></div><div class="field"><label>Referens hos betalleverantör</label><input name="externalRef" value="${sub.externalRef ?? ''}"></div></div>
 <div class="field"><label>Anteckningar</label><textarea name="notes">${sub.notes ?? ''}</textarea></div>
 <div class="actions"><button type="submit">Spara</button></div></form>
+<p class="small muted">Innehållet i boxen bestäms av <a href="/admin/editions">månadens box</a> och är detsamma för alla kunder.</p>
 <dl style="margin-top:12px"><dt>Kund</dt><dd><a href="/admin/customers/${customer.id}">${fullName(customer)}</a> · ${customer.email}</dd><dt>Startad</dt><dd>${fmtDate(sub.startedAt)}</dd><dt>Senast förnyad</dt><dd>${fmtDate(sub.lastRenewedAt)}</dd>${sub.cancelledAt ? html`<dt>Avslutad</dt><dd>${fmtDate(sub.cancelledAt)}</dd>` : ''}</dl>
 </div>
 <div class="card"><h2 style="margin-top:0">Skapade ordrar</h2>${orderTable(orders, { compact: true })}</div>

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type { Db } from '../db/connection.ts';
 import { now, transaction } from '../db/connection.ts';
 import { toCamel, toCamelAll } from '../db/rows.ts';
@@ -22,6 +23,8 @@ export interface Customer {
   excludedFlavors: string[];
   notes: string | null;
   status: 'active' | 'blocked';
+  /** Ogissbar identifierare som hemsidan använder i betygs- och återförsäljarlänkar. */
+  publicToken: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -107,12 +110,12 @@ export function createCustomer(db: Db, input: CustomerInput): Customer {
   const result = db
     .prepare(
       `INSERT INTO customers (email, first_name, last_name, phone, birth_date, street, postal_code, city, country,
-        marketing_consent, pref_strength, pref_flavors, excluded_flavors, notes, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+        marketing_consent, pref_strength, pref_flavors, excluded_flavors, notes, status, public_token, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
     )
     .run(
       v.email, v.firstName, v.lastName, v.phone, v.birthDate, v.street, v.postalCode, v.city, v.country,
-      v.marketingConsent, v.prefStrength, v.prefFlavors, v.excludedFlavors, v.notes, ts, ts,
+      v.marketingConsent, v.prefStrength, v.prefFlavors, v.excludedFlavors, v.notes, newPublicToken(), ts, ts,
     );
   return getCustomer(db, Number(result.lastInsertRowid));
 }
@@ -168,6 +171,17 @@ export function upsertCustomerByEmail(db: Db, input: CustomerInput): Customer {
     if (!existing) return createCustomer(db, input);
     return updateCustomer(db, existing.id, input);
   });
+}
+
+export function newPublicToken(): string {
+  return randomBytes(16).toString('hex');
+}
+
+export function findCustomerByToken(db: Db, token: string): Customer | undefined {
+  return toCamel<Customer>(
+    db.prepare('SELECT * FROM customers WHERE public_token = ?').get(token.trim()) as Record<string, unknown> | undefined,
+    MAP_OPTS,
+  );
 }
 
 export function getCustomer(db: Db, id: number): Customer {

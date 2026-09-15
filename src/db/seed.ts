@@ -6,12 +6,16 @@ import { pathToFileURL } from 'node:url';
 import { config, isProduction } from '../config.ts';
 import { migrate, openDatabase, type Db } from './connection.ts';
 import { createStaffUser, listStaff } from '../services/auth.ts';
-import { createProduct, listProducts } from '../services/products.ts';
+import { createProduct, findProductBySku, listProducts, updateProduct } from '../services/products.ts';
 import { adjustStock } from '../services/inventory.ts';
 import { createCustomer, countCustomers } from '../services/customers.ts';
-import { createOrder, markPaid, pack, ship, startPicking, markDelivered } from '../services/orders.ts';
+import { markPaid, pack, ship, startPicking, markDelivered } from '../services/orders.ts';
 import type { Strength } from '../domain/products.ts';
-import { createSubscription, renewSubscription } from '../services/subscriptions.ts';
+import { createSubscription, pauseSubscription, renewSubscription } from '../services/subscriptions.ts';
+import { createEdition, lockEdition, periodLabel, setEditionItem } from '../services/editions.ts';
+import { upsertSupplierByName } from '../services/suppliers.ts';
+import { createRetailer, recordClick, recordConversion, setRetailerLink } from '../services/retailers.ts';
+import { upsertEditionFeedback, upsertProductRating } from '../services/ratings.ts';
 
 export const DEV_ADMIN_PASSWORD = 'admin123';
 
@@ -61,63 +65,120 @@ export function seedProducts(db: Db): number {
 
 export function seedSampleData(db: Db): number {
   if (countCustomers(db) > 0) return 0;
+
+  // Leverantörer kopplas till varumärkena så att rapporterna kan filtreras per leverantör.
+  const supplierByBrand = new Map<string, number>();
+  for (const brand of new Set(PRODUCTS.map(([, b]) => b))) {
+    supplierByBrand.set(brand, upsertSupplierByName(db, `${brand} Nordic AB`).id);
+  }
+  for (const product of listProducts(db)) {
+    const supplierId = supplierByBrand.get(product.brand);
+    if (supplierId) updateProduct(db, product.id, { supplierId });
+  }
+
+  const sku = (code: string) => findProductBySku(db, code)!.id;
+  const thisPeriod = new Date().toISOString().slice(0, 7);
+  const lastPeriod = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+
+  // Förra månadens box: skickad, betygsatt och uppföljd.
+  const previous = createEdition(db, { period: lastPeriod, name: `Mysterysnus ${periodLabel(lastPeriod)}`, description: 'Mintspecial' });
+  for (const [code, qty] of [['VELO-ICE-COOL-S', 1], ['ZYN-COOL-MINT-S', 1], ['LOOP-MINT-MANIA', 1], ['KILLA-COLD-MINT', 1]] as [string, number][]) {
+    setEditionItem(db, previous.id, sku(code), qty);
+  }
+  lockEdition(db, previous.id);
+
+  // Den här månadens box: klar att plockas.
+  const current = createEdition(db, { period: thisPeriod, name: `Mysterysnus ${periodLabel(thisPeriod)}`, description: 'Frukt och bär' });
+  for (const [code, qty] of [['VELO-TROPIC', 1], ['ZYN-BELLINI', 1], ['NS-BERGAMOT', 1], ['XQS-BLUEBERRY', 1]] as [string, number][]) {
+    setEditionItem(db, current.id, sku(code), qty);
+  }
+  lockEdition(db, current.id);
+
   const anna = createCustomer(db, {
     email: 'anna.andersson@example.com', firstName: 'Anna', lastName: 'Andersson', phone: '070-123 45 67',
-    birthDate: '1988-03-12', street: 'Sveavägen 10', postalCode: '11157', city: 'Stockholm',
-    prefStrength: 'strong', prefFlavors: ['mint'], marketingConsent: true,
+    birthDate: '1988-03-12', street: 'Sveavägen 10', postalCode: '11157', city: 'Stockholm', marketingConsent: true,
   });
   const erik = createCustomer(db, {
     email: 'erik.eriksson@example.com', firstName: 'Erik', lastName: 'Eriksson', phone: '073-987 65 43',
     birthDate: '1995-11-02', street: 'Avenyn 5', postalCode: '41136', city: 'Göteborg',
-    prefStrength: 'extra_strong', excludedFlavors: ['kaffe', 'lakrits'],
   });
   const maja = createCustomer(db, {
     email: 'maja.svensson@example.com', firstName: 'Maja', lastName: 'Svensson',
     birthDate: '2001-07-23', street: 'Stortorget 2', postalCode: '21134', city: 'Malmö',
-    prefStrength: 'mild', prefFlavors: ['bär', 'citrus'],
   });
 
-  // Väntar på betalning
-  createOrder(db, { customerId: maja.id, lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }], paymentMethod: 'klarna', externalRef: 'SHOP-1001', channel: 'web' });
-  // Betald – väntar på plock
-  createOrder(db, {
-    customerId: anna.id, paymentStatus: 'paid', paymentMethod: 'swish', paymentRef: 'SWISH-88213', externalRef: 'SHOP-1002',
-    lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }, { kind: 'product', sku: 'ZYN-COOL-MINT-S', quantity: 3 }],
-    customerNote: 'Gärna extra mycket mint!',
-  });
-  // Plockas
-  const o3 = createOrder(db, { customerId: erik.id, paymentStatus: 'paid', paymentMethod: 'kort', externalRef: 'SHOP-1003', lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 2, strength: 'extra_strong' }] });
-  startPicking(db, o3.id, 'seed');
-  // Packad
-  const o4 = createOrder(db, { customerId: anna.id, paymentStatus: 'paid', paymentMethod: 'swish', externalRef: 'SHOP-1004', lines: [{ kind: 'product', sku: 'VELO-ICE-COOL-S', quantity: 5 }, { kind: 'product', sku: 'KILLA-COLD-MINT', quantity: 5 }] });
-  startPicking(db, o4.id, 'seed');
-  pack(db, o4.id, 'seed');
-  // Skickad
-  const o5 = createOrder(db, { customerId: erik.id, paymentStatus: 'paid', paymentMethod: 'klarna', externalRef: 'SHOP-1005', lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }] });
-  startPicking(db, o5.id, 'seed');
-  pack(db, o5.id, 'seed');
-  ship(db, o5.id, { carrier: 'postnord', service: 'MyPack Collect', trackingNumber: '00370733350012345678', pickupPoint: 'ICA Nära Avenyn' }, 'seed');
-  // Levererad
-  const o6 = createOrder(db, { customerId: maja.id, paymentStatus: 'paid', paymentMethod: 'swish', externalRef: 'SHOP-1006', lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }], placedAt: new Date(Date.now() - 14 * 86_400_000).toISOString() });
-  startPicking(db, o6.id, 'seed');
-  pack(db, o6.id, 'seed');
-  ship(db, o6.id, { carrier: 'budbee', trackingNumber: 'BUDBEE-55123' }, 'seed');
-  const o7 = createOrder(db, { customerId: anna.id, paymentStatus: 'paid', paymentMethod: 'kort', externalRef: 'SHOP-0999', lines: [{ kind: 'mystery_box', boxSize: 4, quantity: 1 }], placedAt: new Date(Date.now() - 30 * 86_400_000).toISOString() });
-  startPicking(db, o7.id, 'seed');
-  pack(db, o7.id, 'seed');
-  ship(db, o7.id, { carrier: 'instabox', trackingNumber: 'IB-9981' }, 'seed');
-  markDelivered(db, o7.id, 'seed');
+  // Prenumerationer i olika vågor och lägen.
+  const subAnna = createSubscription(db, { customerId: anna.id, wave: 1, paymentMethod: 'klarna', externalRef: 'STRIPE-SUB-001' }, 'seed');
+  const subErik = createSubscription(db, { customerId: erik.id, wave: 2, paymentMethod: 'kort', externalRef: 'STRIPE-SUB-002' }, 'seed');
+  const subMaja = createSubscription(db, { customerId: maja.id, wave: 3, paymentMethod: 'swish' }, 'seed');
+  // Startdatum spridda över månaden så att vågfördelningen syns i demodatan.
+  const joined = (dayOfMonth: number) => {
+    const d = new Date();
+    return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 2, dayOfMonth, 9)).toISOString();
+  };
+  for (const [sub, day] of [[subAnna, 3], [subErik, 10], [subMaja, 20]] as const) {
+    db.prepare('UPDATE subscriptions SET started_at = ? WHERE id = ?').run(joined(day), sub.id);
+  }
 
-  // Prenumerationer: Anna har fått sin första box (betald), Erik förnyas om några dagar, Maja är pausad.
-  const subAnna = createSubscription(db, { customerId: anna.id, paymentMethod: 'klarna', externalRef: 'STRIPE-SUB-001', startAt: new Date(Date.now() - 2 * 86_400_000).toISOString() }, 'seed');
-  const renewed = renewSubscription(db, subAnna.id, { paymentStatus: 'paid', paymentRef: 'KL-77001' }, 'seed');
-  markPaid; // (används inte – behålls för tydlighet i importen)
-  void renewed;
-  createSubscription(db, { customerId: erik.id, strength: 'extra_strong', paymentMethod: 'kort', externalRef: 'STRIPE-SUB-002', startAt: new Date(Date.now() + 3 * 86_400_000).toISOString() }, 'seed');
-  const subMaja = createSubscription(db, { customerId: maja.id, strength: 'mild', paymentMethod: 'swish', startAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), notes: 'Vill ha fruktiga smaker' }, 'seed');
-  db.prepare("UPDATE subscriptions SET status = 'paused' WHERE id = ?").run(subMaja.id);
-  return 8;
+  // Förra månaden: boxen skickades till Anna och Erik och har levererats.
+  let orderCount = 0;
+  for (const [sub, carrier, tracking] of [[subAnna, 'postnord', '00370733350012345678'], [subErik, 'budbee', 'BUDBEE-55123']] as const) {
+    const renewed = renewSubscription(db, sub.id, { period: lastPeriod, paymentStatus: 'paid', paymentRef: `PAY-${sub.id}-1`, advance: false }, 'seed');
+    startPicking(db, renewed.order.id, 'seed');
+    pack(db, renewed.order.id, 'seed');
+    ship(db, renewed.order.id, { carrier, trackingNumber: tracking }, 'seed');
+    markDelivered(db, renewed.order.id, 'seed');
+    orderCount++;
+  }
+
+  // Betyg på förra månadens box.
+  const ratings: [customerId: number, code: string, rating: number, sentiment: 'like' | 'dislike' | 'neutral', buyAgain: boolean, comment: string | null][] = [
+    [anna.id, 'VELO-ICE-COOL-S', 5, 'like', true, 'Perfekt styrka och håller länge.'],
+    [anna.id, 'ZYN-COOL-MINT-S', 4, 'like', true, null],
+    [anna.id, 'LOOP-MINT-MANIA', 2, 'dislike', false, 'Alldeles för stark för mig.'],
+    [anna.id, 'KILLA-COLD-MINT', 3, 'neutral', false, null],
+    [erik.id, 'VELO-ICE-COOL-S', 4, 'like', true, null],
+    [erik.id, 'ZYN-COOL-MINT-S', 3, 'neutral', false, 'Okej men inget jag skulle köpa själv.'],
+    [erik.id, 'LOOP-MINT-MANIA', 5, 'like', true, 'Bästa i boxen! Vill ha mer av den här.'],
+    [erik.id, 'KILLA-COLD-MINT', 4, 'like', true, null],
+  ];
+  for (const [customerId, code, rating, sentiment, buyAgain, comment] of ratings) {
+    upsertProductRating(db, { customerId, editionId: previous.id, productId: sku(code), rating, sentiment, wouldBuyAgain: buyAgain, comment, source: 'seed' });
+  }
+  upsertEditionFeedback(db, { customerId: anna.id, editionId: previous.id, rating: 4, comment: 'Bra box, gärna mindre extra starkt nästa gång.' });
+  upsertEditionFeedback(db, { customerId: erik.id, editionId: previous.id, rating: 5, comment: null });
+
+  // Återförsäljare och köplänkar, med några klick och ett rapporterat köp.
+  const snusbolaget = createRetailer(db, { name: 'Snusbolaget', website: 'https://exempel-snusbolaget.se' });
+  const nikotinshop = createRetailer(db, { name: 'Nikotinshop', website: 'https://exempel-nikotinshop.se' });
+  for (const [retailerId, code, priceKr] of [
+    [snusbolaget.id, 'VELO-ICE-COOL-S', 42], [snusbolaget.id, 'LOOP-MINT-MANIA', 44], [snusbolaget.id, 'ZYN-COOL-MINT-S', 43],
+    [nikotinshop.id, 'LOOP-MINT-MANIA', 41], [nikotinshop.id, 'KILLA-COLD-MINT', 49],
+  ] as [number, string, number][]) {
+    setRetailerLink(db, { retailerId, productId: sku(code), url: `https://exempel.se/${code.toLowerCase()}`, priceOre: priceKr * 100 });
+  }
+  const loopLink = db.prepare('SELECT id FROM retailer_links WHERE product_id = ? AND retailer_id = ?').get(sku('LOOP-MINT-MANIA'), snusbolaget.id) as { id: number };
+  const veloLink = db.prepare('SELECT id FROM retailer_links WHERE product_id = ? AND retailer_id = ?').get(sku('VELO-ICE-COOL-S'), snusbolaget.id) as { id: number };
+  const click = recordClick(db, loopLink.id, { customerId: erik.id, period: lastPeriod, source: 'seed' });
+  recordConversion(db, click.conversionRef, { valueOre: 16_400 });
+  recordClick(db, loopLink.id, { customerId: anna.id, period: lastPeriod, source: 'seed' });
+  recordClick(db, veloLink.id, { customerId: anna.id, period: lastPeriod, source: 'seed' });
+
+  // Den här månaden: Anna är packad, Erik betald och väntar på plock, Maja är pausad.
+  const annaNow = renewSubscription(db, subAnna.id, { period: thisPeriod, paymentStatus: 'paid', paymentRef: 'PAY-NOW-1' }, 'seed');
+  startPicking(db, annaNow.order.id, 'seed');
+  pack(db, annaNow.order.id, 'seed');
+  orderCount++;
+  renewSubscription(db, subErik.id, { period: thisPeriod, paymentStatus: 'paid', paymentRef: 'PAY-NOW-2' }, 'seed');
+  orderCount++;
+  renewSubscription(db, subMaja.id, { period: thisPeriod }, 'seed');
+  orderCount++;
+  pauseSubscription(db, subMaja.id);
+
+  void markPaid;
+  return orderCount;
 }
+
 
 // Körs bara när filen startas direkt (`npm run seed`), inte när den importeras.
 // pathToFileURL behövs för att jämförelsen ska fungera även på Windows.
@@ -137,7 +198,7 @@ if (runDirectly) {
   if (products) console.log(`Lade in ${products} exempelprodukter.`);
   if (!isProduction()) {
     const orders = seedSampleData(db);
-    if (orders) console.log(`Lade in exempelkunder, ${orders} exempelordrar och 3 prenumerationer.`);
+    if (orders) console.log(`Lade in exempelkunder, ${orders} exempelordrar, 2 månadsboxar med betyg och 3 prenumerationer.`);
   }
   console.log('Klart.');
   db.close();

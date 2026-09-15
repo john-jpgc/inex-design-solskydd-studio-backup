@@ -18,6 +18,7 @@ import { assertOfAge, fullName, getCustomer, upsertCustomerByEmail, type Custome
 import { availableStock, findProductBySku, getProduct, listProducts } from './products.ts';
 import { adjustStock, commitReserved, consumeStock, releaseStock, reserveStock } from './inventory.ts';
 import { createShipment, listShipmentsForOrder, type Shipment, type ShipmentInput } from './shipments.ts';
+import { findEditionByPeriod, getEdition, periodLabel } from './editions.ts';
 
 export type PaymentStatus = 'unpaid' | 'paid' | 'refund_due' | 'refunded';
 
@@ -60,6 +61,8 @@ export interface Order {
   cancelledAt: string | null;
   subscriptionId: number | null;
   period: string | null;
+  /** Vilken månadsbox ordern innehåller. Sätts för prenumerationsordrar. */
+  editionId: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -139,6 +142,11 @@ export interface CreateOrderInput {
   /** Fraktkostnad i öre. Utelämnas → beräknas enligt fraktreglerna. */
   shippingOre?: number;
   channel?: string;
+  /**
+   * Månadens box som orderns box-rader ska fyllas med. Utelämnas helt binds
+   * periodens box automatiskt; `null` ger en fristående box utan utgåva.
+   */
+  editionId?: number | null;
   /** T.ex. ordernummer i webbshopen. Unikt – dubbletter avvisas. */
   externalRef?: string | null;
   customerNote?: string | null;
@@ -213,6 +221,15 @@ export function createOrder(db: Db, input: CreateOrderInput, actor = 'system'): 
 
     if (!input.lines?.length) throw invalid('EMPTY_ORDER', 'Ordern måste innehålla minst en rad');
 
+    // Alla kunder får samma box: om inget annat anges binds periodens utgåva automatiskt.
+    const hasBoxLine = input.lines.some((l) => l.kind === 'mystery_box');
+    const edition =
+      input.editionId != null
+        ? getEdition(db, input.editionId)
+        : input.editionId === undefined && hasBoxLine
+          ? findEditionByPeriod(db, (input.placedAt ?? new Date().toISOString()).slice(0, 7))
+          : undefined;
+
     type ResolvedLine = {
       kind: 'product' | 'mystery_box';
       productId: number | null;
@@ -243,17 +260,21 @@ export function createOrder(db: Db, input: CreateOrderInput, actor = 'system'): 
         });
       } else {
         if (!Number.isInteger(line.boxSize) || line.boxSize <= 0) throw invalid('INVALID_BOX_SIZE', 'Boxstorlek måste vara ett positivt heltal');
-        const price = line.unitPriceOre ?? config.mysteryBoxPricesOre[line.boxSize];
-        if (price == null) throw invalid('UNKNOWN_BOX_SIZE', `Inget pris finns för box med ${line.boxSize} dosor – ange unitPriceOre`);
+        // Utgåvan bestämmer hur många dosor boxen innehåller.
+        const boxSize = edition && edition.totalCans > 0 ? edition.totalCans : line.boxSize;
+        const price = line.unitPriceOre ?? config.mysteryBoxPricesOre[boxSize];
+        if (price == null) throw invalid('UNKNOWN_BOX_SIZE', `Inget pris finns för box med ${boxSize} dosor – ange unitPriceOre`);
         const strength = line.strength ?? null;
         lines.push({
           kind: 'mystery_box',
           productId: null,
-          description: `Mystery box ${line.boxSize} dosor${strength ? ` (${STRENGTH_LABELS[strength]})` : ''}`,
+          description: edition
+            ? `${edition.name} (${boxSize} dosor)`
+            : `Mystery box ${boxSize} dosor${strength ? ` (${STRENGTH_LABELS[strength]})` : ''}`,
           quantity: line.quantity,
           unitPriceOre: Math.round(price),
           vatRate: config.vatRate,
-          boxSize: line.boxSize,
+          boxSize,
           boxStrength: strength,
         });
       }
@@ -295,6 +316,8 @@ export function createOrder(db: Db, input: CreateOrderInput, actor = 'system'): 
       insertLine.run(nextId, l.kind, l.productId, l.description, l.quantity, l.unitPriceOre, l.vatRate, l.boxSize, l.boxStrength);
       if (l.kind === 'product' && l.productId != null) reserveStock(db, l.productId, l.quantity, orderNumber);
     }
+
+    if (edition) db.prepare('UPDATE orders SET edition_id = ? WHERE id = ?').run(edition.id, nextId);
 
     addOrderEvent(db, nextId, 'created', `Order ${orderNumber} skapad via ${input.channel ?? 'web'}`, actor);
     if (paid) addOrderEvent(db, nextId, 'paid', `Betald (${input.paymentMethod ?? 'okänd metod'})`, actor);
@@ -428,41 +451,63 @@ export function startPicking(db: Db, id: number, actor = 'system', opts: { seed?
     assertTransition(order, 'picking');
     if (order.paymentStatus !== 'paid') throw invalid('NOT_PAID', 'Ordern måste vara betald innan plockning');
 
-    const candidates: PickCandidate[] = listProducts(db, { activeOnly: true, inStockOnly: true }).map((p) => ({
-      id: p.id,
-      brand: p.brand,
-      flavor: p.flavor,
-      strength: p.strength,
-      available: availableStock(p),
-    }));
-    const sent = previouslySentProductIds(db, order.customerId, id);
-    const seed = opts.seed ?? id * 7919 + candidates.length;
+    const boxLines = order.lines.filter((l) => l.kind === 'mystery_box' && l.boxSize);
+    const edition = order.editionId != null ? getEdition(db, order.editionId) : undefined;
 
     let shortfall = 0;
-    for (const line of order.lines) {
-      if (line.kind !== 'mystery_box' || !line.boxSize) continue;
-      const needed = line.boxSize * line.quantity;
-      const picks = pickMysteryBox(candidates, {
-        boxSize: needed,
-        strength: line.boxStrength ?? order.customer.prefStrength,
-        preferredFlavors: order.customer.prefFlavors,
-        excludedFlavors: order.customer.excludedFlavors,
-        previouslySent: sent,
-        seed: seed + line.id,
-      });
-      replacePicks(db, line.id, picks);
-      shortfall += needed - totalQuantity(picks);
-      // Minska tillgängligheten för nästa rad i samma order.
-      for (const pick of picks) {
-        const c = candidates.find((x) => x.id === pick.productId);
-        if (c) c.available -= pick.quantity;
+    if (edition) {
+      // Alla kunder får samma innehåll: hämta det direkt ur månadens box.
+      if (edition.status === 'draft') {
+        throw invalid('EDITION_NOT_LOCKED', `Boxen för ${periodLabel(edition.period)} är inte låst än – lås den innan plockning startar`);
+      }
+      for (const line of boxLines) {
+        const picks = edition.items.map((item) => ({ productId: item.productId, quantity: item.quantity * line.quantity }));
+        replacePicks(db, line.id, picks);
+      }
+      const needPerProduct = new Map<number, number>();
+      for (const line of boxLines) {
+        for (const item of edition.items) {
+          needPerProduct.set(item.productId, (needPerProduct.get(item.productId) ?? 0) + item.quantity * line.quantity);
+        }
+      }
+      for (const [productId, needed] of needPerProduct) {
+        const product = getProduct(db, productId);
+        if (availableStock(product) < needed) shortfall += needed - availableStock(product);
+      }
+    } else if (boxLines.length > 0) {
+      // Ingen utgåva kopplad (enstaka order utanför prenumerationen): föreslå innehåll ur lagret.
+      const candidates: PickCandidate[] = listProducts(db, { activeOnly: true, inStockOnly: true }).map((p) => ({
+        id: p.id,
+        brand: p.brand,
+        flavor: p.flavor,
+        strength: p.strength,
+        available: availableStock(p),
+      }));
+      const sent = previouslySentProductIds(db, order.customerId, id);
+      const seed = opts.seed ?? id * 7919 + candidates.length;
+      for (const line of boxLines) {
+        const needed = (line.boxSize ?? 0) * line.quantity;
+        const picks = pickMysteryBox(candidates, {
+          boxSize: needed,
+          strength: line.boxStrength ?? order.customer.prefStrength,
+          preferredFlavors: order.customer.prefFlavors,
+          excludedFlavors: order.customer.excludedFlavors,
+          previouslySent: sent,
+          seed: seed + line.id,
+        });
+        replacePicks(db, line.id, picks);
+        shortfall += needed - totalQuantity(picks);
+        for (const pick of picks) {
+          const c = candidates.find((x) => x.id === pick.productId);
+          if (c) c.available -= pick.quantity;
+        }
       }
     }
 
     setStatus(db, id, 'picking');
-    addOrderEvent(db, id, 'picking', 'Plockning påbörjad', actor);
+    addOrderEvent(db, id, 'picking', edition ? `Plockning påbörjad – innehåll från ${edition.name}` : 'Plockning påbörjad', actor);
     if (shortfall > 0) {
-      addOrderEvent(db, id, 'warning', `Lagret räcker inte: ${shortfall} dosor saknas i förslaget – komplettera manuellt`, actor);
+      addOrderEvent(db, id, 'warning', `Lagret räcker inte: ${shortfall} dosor saknas – komplettera manuellt`, actor);
     }
     return getOrder(db, id);
   });

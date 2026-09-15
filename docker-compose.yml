@@ -10,6 +10,8 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@mysterysnus.se}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Sätt ADMIN_PASSWORD i .env}
       LABEL_PROVIDER: ${LABEL_PROVIDER:-manual}
+      SHIPPING_WAVE_MODE: ${SHIPPING_WAVE_MODE:-single}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     volumes:
       - oms-data:/app/data
     restart: unless-stopped

@@ -30,6 +30,20 @@ export const config = {
     /** Hur ofta förnyelser körs automatiskt i servern (ms). */
     renewalIntervalMs: 60 * 60 * 1000,
   },
+  /**
+   * Utskicksvågor. Alla kunder får samma box varje månad, men behöver inte få den
+   * samma dag. "single" skickar till alla samtidigt (läget i början), "weekly"
+   * delar kunderna i fyra grupper efter när de gick med, en grupp per vecka.
+   */
+  waves: {
+    mode: (env.SHIPPING_WAVE_MODE === 'weekly' ? 'weekly' : 'single') as 'single' | 'weekly',
+    /** Dag i månaden då respektive våg förnyas. Våg 1 används i "single"-läge. */
+    daysOfMonth: [1, 8, 15, 22],
+    /** Timme (UTC) då förnyelsen sker. */
+    hourUtc: 6,
+  },
+  /** Publik bas-URL som används när hemsidan bygger betygs- och återförsäljarlänkar. */
+  publicBaseUrl: env.PUBLIC_BASE_URL ?? '',
   /** Etikettleverantör: "manual" (kollinummer skrivs in för hand), "nshift" eller "postnord". */
   labelProvider: env.LABEL_PROVIDER ?? 'manual',
   /** Avsändaradress som skrivs på fraktetiketter. */
