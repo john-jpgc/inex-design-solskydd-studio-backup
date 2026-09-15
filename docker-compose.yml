@@ -1,0 +1,19 @@
+services:
+  oms:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DATABASE_PATH: /app/data/mysterysnus.db
+      API_KEY: ${API_KEY:?Sätt API_KEY i .env}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@mysterysnus.se}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Sätt ADMIN_PASSWORD i .env}
+      LABEL_PROVIDER: ${LABEL_PROVIDER:-manual}
+      SHIPPING_WAVE_MODE: ${SHIPPING_WAVE_MODE:-single}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes:
+      - oms-data:/app/data
+    restart: unless-stopped
+volumes:
+  oms-data:
